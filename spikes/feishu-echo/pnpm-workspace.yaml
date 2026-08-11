@@ -1,0 +1,11 @@
+# pnpm v11 build-script approvals for the spike's standalone
+# (--ignore-workspace) install. Both deps ship what tsx needs without their
+# postinstall: esbuild's native binary arrives via optionalDependencies
+# (@esbuild/<platform>); protobufjs' postinstall only builds its own CLI
+# (pbjs/pbts), which the spike never calls. Explicitly denying them here —
+# rather than leaving them unset — stops pnpm from treating them as "ignored",
+# which is what made the v11 run-wrapper fail with ERR_PNPM_IGNORED_BUILDS on
+# `pnpm start` / `pnpm typecheck`.
+allowBuilds:
+  esbuild: false
+  protobufjs: false
