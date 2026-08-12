@@ -128,6 +128,7 @@ import {
 } from "./lib/event-stream-hub";
 import { PgEventStreamHub } from "./lib/pg-event-stream-hub";
 import { NodeHarnessRuntime } from "./lib/node-harness-runtime";
+import { resolveNodeAuxModel } from "./lib/node-aux-model.js";
 import { SessionRegistry } from "./registry.js";
 
 const toMarkdownProvider = nodeToMarkdown();
@@ -559,10 +560,22 @@ const sessionRegistry = new SessionRegistry({
   },
   buildTools: async (agent, sandbox, tenantId) => {
     const creds = await resolveNodeModelCreds(tenantId, agent.model);
+    // Task 2 (§3.8): resolve agent.aux_model so web_fetch can summarize
+    // large pages. Failure degrades to null (raw markdown), never fails
+    // the turn — unlike the primary model above.
+    const aux = await resolveNodeAuxModel({
+      tenantId,
+      auxModel: agent.aux_model,
+      resolveCredentials: resolveNodeModelCreds,
+      buildModel: (c) =>
+        resolveModel(c.wireModel, c.apiKey, c.baseURL, c.apiCompat, c.customHeaders),
+    });
     return buildTools(agent, sandbox, {
       ANTHROPIC_API_KEY: creds.apiKey,
       ANTHROPIC_BASE_URL: creds.baseURL,
       toMarkdown: toMarkdownProvider,
+      auxModel: aux?.model,
+      auxModelInfo: aux?.modelInfo,
     });
   },
   buildHarness: () => {
@@ -579,14 +592,20 @@ const sessionRegistry = new SessionRegistry({
     });
     await runtime.refreshHistory();
     const rawSystemPrompt = input.agent.system ?? "";
+    // Task 2 (§3.8): reminders are the snapshot SessionRegistry.build()
+    // froze from the exact mount list it provisioned — never re-read per
+    // turn, so the prompt can't drift from the actual mounts (late
+    // bindings are rejected with 409 by the binding routes).
+    const reminders = input.memoryReminders;
     return {
       agent: input.agent,
       userMessage: input.userMessage,
       session_id: input.sessionId,
       tools: input.tools as HarnessContext["tools"],
       model: input.model,
-      systemPrompt: composeSystemPrompt(rawSystemPrompt),
+      systemPrompt: composeSystemPrompt(rawSystemPrompt, reminders),
       rawSystemPrompt,
+      platformReminders: reminders,
       env: {
         ANTHROPIC_API_KEY: creds.apiKey,
         ANTHROPIC_BASE_URL: creds.baseURL,
@@ -1131,6 +1150,66 @@ v1.delete("/files/:id", async (c) => {
   }
 });
 
+// ── Session ↔ memory_store binding (Node-specific; not in package yet) ──
+// Registered BEFORE app.route("/v1", v1) below — Hono copies the sub-app's
+// routes at mount time, so handlers added afterwards are dead code.
+
+v1.post("/sessions/:id/memory_stores", async (c) => {
+  const sid = c.req.param("id");
+  const session = await sql
+    .prepare(`SELECT id FROM sessions WHERE tenant_id = ? AND id = ?`)
+    .bind(c.var.tenant_id, sid)
+    .first();
+  if (!session) return c.json({ error: "Session not found" }, 404);
+  const body = await c.req.json<{ store_id: string; access?: string }>();
+  if (!body.store_id) return c.json({ error: "store_id is required" }, 400);
+  const access = body.access === "read_only" ? "read_only" : "read_write";
+  // Lifecycle gate — the registry serializes "check-not-built + write"
+  // against build() per session (in-process half) and the write itself
+  // is a conditional INSERT that only lands while sessions.memory_frozen_at
+  // IS NULL (DB half, safe across PG replicas with no sticky routing).
+  // A 201 guarantees the binding is in the frozen mount/reminder snapshot;
+  // a 409 means the machine already froze without it. Store validation
+  // happens inside the gate, so a 201 never persists a phantom store.
+  const res = await sessionRegistry.bindMemoryStore({
+    sessionId: sid,
+    tenantId: c.var.tenant_id,
+    storeId: body.store_id,
+    access,
+  });
+  if (res === "store_not_found") {
+    return c.json({ error: "Memory store not found" }, 404);
+  }
+  if (res === "frozen") {
+    return c.json(
+      {
+        error:
+          "Memory bindings are frozen once the session has started running. " +
+          "Create a new session to attach additional memory stores.",
+      },
+      409,
+    );
+  }
+  return c.json({ session_id: sid, store_id: body.store_id, access }, 201);
+});
+v1.get("/sessions/:id/memory_stores", async (c) => {
+  const sid = c.req.param("id");
+  // Tenant-scope the lookup — without this, any tenant holding a valid
+  // session id could read another tenant's bindings.
+  const session = await sql
+    .prepare(`SELECT id FROM sessions WHERE tenant_id = ? AND id = ?`)
+    .bind(c.var.tenant_id, sid)
+    .first();
+  if (!session) return c.json({ error: "Session not found" }, 404);
+  const r = await sql
+    .prepare(
+      `SELECT store_id, access, created_at FROM session_memory_stores WHERE session_id = ?`,
+    )
+    .bind(sid)
+    .all<{ store_id: string; access: string; created_at: number }>();
+  return c.json({ data: r.results ?? [] });
+});
+
 app.route("/v1", v1);
 
 // /v1/oma/* mirror — same Hono sub-app mounted twice. New OMA-only
@@ -1259,42 +1338,6 @@ const _capResolver = new OmaVaultResolver({
   },
 });
 void _capResolver;
-
-// ── Session ↔ memory_store binding (Node-specific; not in package yet) ──
-v1.post("/sessions/:id/memory_stores", async (c) => {
-  const sid = c.req.param("id");
-  const session = await sql
-    .prepare(`SELECT id FROM sessions WHERE tenant_id = ? AND id = ?`)
-    .bind(c.var.tenant_id, sid)
-    .first();
-  if (!session) return c.json({ error: "Session not found" }, 404);
-  const body = await c.req.json<{ store_id: string; access?: string }>();
-  if (!body.store_id) return c.json({ error: "store_id is required" }, 400);
-  const store = await memoryService.getStore({
-    tenantId: c.var.tenant_id,
-    storeId: body.store_id,
-  });
-  if (!store) return c.json({ error: "Memory store not found" }, 404);
-  const access = body.access === "read_only" ? "read_only" : "read_write";
-  await sql
-    .prepare(
-      `INSERT INTO session_memory_stores (session_id, store_id, access, created_at)
-       VALUES (?, ?, ?, ?)
-       ON CONFLICT(session_id, store_id) DO UPDATE SET access = excluded.access`,
-    )
-    .bind(sid, body.store_id, access, Date.now())
-    .run();
-  return c.json({ session_id: sid, store_id: body.store_id, access }, 201);
-});
-v1.get("/sessions/:id/memory_stores", async (c) => {
-  const r = await sql
-    .prepare(
-      `SELECT store_id, access, created_at FROM session_memory_stores WHERE session_id = ?`,
-    )
-    .bind(c.req.param("id"))
-    .all<{ store_id: string; access: string; created_at: number }>();
-  return c.json({ data: r.results ?? [] });
-});
 
 // ── Console UI (optional) ──
 const consoleDir = process.env.CONSOLE_DIR;
