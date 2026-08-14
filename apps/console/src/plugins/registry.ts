@@ -26,6 +26,12 @@
 
 import type { ReactNode, ComponentType } from "react";
 
+// Enterprise AIOps line: alert list + approval queue views
+// (docs/aiops-closed-loop.md). Registered via the plugin hook so the
+// Console-side upgrade surface is exactly this array. Hosted overlays
+// that replace this file must preserve the registration.
+import { aiopsPlugin } from "./aiops";
+
 export interface PluginNavItem {
   to: string;
   label: string;
@@ -54,4 +60,4 @@ export interface ConsolePlugin {
   navGroups?: PluginNavGroup[];
 }
 
-export const consolePlugins: ConsolePlugin[] = [];
+export const consolePlugins: ConsolePlugin[] = [aiopsPlugin];
