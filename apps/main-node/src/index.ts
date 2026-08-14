@@ -94,6 +94,7 @@ import {
   SqlSlackAppRepo,
   WebCryptoAesGcm,
   CryptoIdGenerator,
+  WorkerHttpClient,
   type NodeReposEnv,
 } from "@open-managed-agents/integrations-adapters-node";
 import {
@@ -102,6 +103,11 @@ import {
 } from "./lib/node-install-bridge.js";
 import { OmaVaultResolver } from "@open-managed-agents/oma-cap-adapter";
 import { NodeSessionRouter } from "./lib/node-session-router.js";
+import {
+  configureFeishuAgentTools,
+  resolveFeishuAgentTools,
+  sqlSessionMetadataReader,
+} from "./lib/feishu-agent-tools.js";
 import { nodeOutputsAdapter } from "./lib/node-outputs-adapter.js";
 import { nodeSessionLifecycle } from "./lib/node-session-lifecycle.js";
 import { NodeWorkspaceBackupService } from "./lib/node-workspace-backup.js";
@@ -582,11 +588,19 @@ const sessionRegistry = new SessionRegistry({
     });
     await runtime.refreshHistory();
     const rawSystemPrompt = input.agent.system ?? "";
+    // Feishu-backed sessions get two live tools (mcp__feishu__im_message_send,
+    // mcp__feishu__im_chat_read) wired straight to FeishuApiClient. Non-Feishu
+    // sessions resolve to {} (a safe no-op spread). Token handling lives inside
+    // FeishuApiClient — see lib/feishu-agent-tools.ts.
+    const feishuTools = await resolveFeishuAgentTools(input.sessionId);
     return {
       agent: input.agent,
       userMessage: input.userMessage,
       session_id: input.sessionId,
-      tools: input.tools as HarnessContext["tools"],
+      tools: {
+        ...(input.tools as Record<string, unknown>),
+        ...feishuTools,
+      } as HarnessContext["tools"],
       model: input.model,
       systemPrompt: composeSystemPrompt(rawSystemPrompt),
       rawSystemPrompt,
@@ -1051,12 +1065,26 @@ if (platformRootSecret && installBridge && process.env.FEISHU_WS_RUNNER === "1")
     const { startFeishuWsRunner } = await import("./lib/ws-feishu-runner.js");
     const feishuContainer = installBridge.buildContainers().feishu;
     const feishuProvider = buildNodeProvidersForRequest(installBridge, gatewayOrigin).feishu;
+    // HTTP adapter for the automatic-egress send path (FeishuApiClient). One
+    // instance serves all Feishu Apps; the client mints/caches its own token.
+    const feishuHttp = new WorkerHttpClient();
+    // Wire the live Feishu agent tools (send/read) into the harness tool map
+    // for Feishu-backed sessions. Same publication repo + HTTP adapter as the
+    // runner — the WS runner is the only ingest path that produces Feishu
+    // sessions, so this is the only place that needs configuring.
+    configureFeishuAgentTools({
+      reader: sqlSessionMetadataReader(sql),
+      pubs: feishuContainer.feishuPublications,
+      http: feishuHttp,
+    });
     feishuRunner = await startFeishuWsRunner({
       sql,
       pubs: feishuContainer.feishuPublications,
       installations: feishuContainer.feishuInstallations,
       webhookEvents: feishuContainer.webhookEvents,
       provider: feishuProvider,
+      hub,
+      http: feishuHttp,
     });
   } catch (err) {
     logger.warn(
@@ -1470,6 +1498,27 @@ function bridgeAsInstallProxy(bridge: NodeInstallBridge): InstallProxyForwarder 
         });
       }
 
+      // Form-token reissue (wizard resume path): `<provider>/publications/<id>/form-token`.
+      // Has a dynamic :id segment so it can't fold into the static-mode regex below —
+      // handle it first and inject the id as body.publicationId (the bridge's
+      // `form-token` mode reads it). Mounted for slack/github/feishu; linear returns
+      // 410 inside the bridge.
+      const formTokenRe = /^([^/]+)\/publications\/([^/]+)\/form-token$/.exec(subpath);
+      if (formTokenRe && method === "POST") {
+        const result = await bridge.startInstallation!({
+          provider: formTokenRe[1] as "linear" | "github" | "slack" | "feishu",
+          mode: "form-token",
+          body: {
+            ...(body ?? {}),
+            publicationId: formTokenRe[2],
+          } as Record<string, unknown>,
+        });
+        return new Response(JSON.stringify(result.body), {
+          status: result.status,
+          headers: { "content-type": "application/json" },
+        });
+      }
+
       const m = /^([^/]+)\/publications\/(start-a1|credentials|handoff-link|personal-token)$/.exec(
         subpath,
       );
@@ -1481,7 +1530,7 @@ function bridgeAsInstallProxy(bridge: NodeInstallBridge): InstallProxyForwarder 
       }
       const [, provider, mode] = m;
       const result = await bridge.startInstallation!({
-        provider: provider as "linear" | "github" | "slack",
+        provider: provider as "linear" | "github" | "slack" | "feishu",
         mode: mode as "start-a1" | "credentials" | "handoff-link" | "personal-token",
         body: (body ?? {}) as Record<string, unknown>,
       });
