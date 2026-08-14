@@ -36,6 +36,13 @@
       "when": 1786693192447,
       "tag": "0004_milky_prodigy",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1786694724367,
+      "tag": "0005_awesome_warstar",
+      "breakpoints": true
     }
   ]
 }
