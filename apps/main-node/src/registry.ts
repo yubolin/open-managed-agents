@@ -43,6 +43,10 @@ import type {
 import type { LanguageModel } from "ai";
 import { getLogger } from "@open-managed-agents/observability";
 import type { EventStreamHub } from "./lib/event-stream-hub.js";
+import {
+  remindersFromMounts,
+  type MemoryReminder,
+} from "./lib/memory-reminders.js";
 
 const log = getLogger("session-registry");
 
@@ -91,6 +95,10 @@ export interface SessionRegistryDeps {
     sessionId: string;
     tenantId: string;
     eventLog: SqlEventLog;
+    /** Memory reminders frozen at build() time — derived from the exact
+     *  mount list this machine provisioned (no per-turn re-read: bindings
+     *  added after build are rejected with 409 by the binding routes). */
+    memoryReminders: MemoryReminder[];
   }): Promise<unknown>;
 
   /** Sandbox workdir root, e.g. /app/data/sandboxes. Per-session dirs
@@ -111,8 +119,23 @@ interface SessionEntry {
 
 export class SessionRegistry {
   private map = new Map<string, Promise<SessionEntry>>();
+  /** Per-session serialization for the bind-vs-freeze race (TOCTOU).
+   *  Both build() (via getOrCreate) and bindMemoryStore run under this
+   *  lock, so a binding write and the build-time snapshot read can never
+   *  interleave: a bind either lands BEFORE build reads the table (and is
+   *  mounted + reminded) or is rejected with a conflict. */
+  private sessionLocks = new Map<string, Promise<unknown>>();
 
   constructor(private deps: SessionRegistryDeps) {}
+
+  private withSessionLock<T>(sessionId: string, fn: () => Promise<T>): Promise<T> {
+    const prev = this.sessionLocks.get(sessionId) ?? Promise.resolve();
+    const run = prev.catch(() => undefined).then(fn);
+    // Bounded like `map` itself: one entry per session ever touched in
+    // this process.
+    this.sessionLocks.set(sessionId, run.catch(() => undefined));
+    return run;
+  }
 
   /**
    * Get-or-create the SessionStateMachine for a session. Lazy: the
@@ -123,10 +146,72 @@ export class SessionRegistry {
   async getOrCreate(sessionId: string, tenantId: string): Promise<SessionEntry> {
     let p = this.map.get(sessionId);
     if (!p) {
-      p = this.build(sessionId, tenantId);
+      // map.set happens synchronously BEFORE the locked build is queued:
+      // from that instant isBuilt() returns true, so a concurrent
+      // bindMemoryStore either already committed (build will see it) or
+      // gets a conflict — never a silent drift.
+      p = this.withSessionLock(sessionId, () => this.build(sessionId, tenantId));
+      // Identity-safe rejection cleanup: a failed build (transient
+      // sandbox / mount / model error) must NOT leave the session
+      // permanently "built". Only delete if the map still holds THIS
+      // promise — never a successor. build() itself clears the DB-level
+      // freeze flag on failure, so a retry can also accept new binds.
+      void p.catch(() => {
+        if (this.map.get(sessionId) === p) this.map.delete(sessionId);
+      });
       this.map.set(sessionId, p);
     }
     return p;
+  }
+
+  /**
+   * Bind-or-freeze gate for POST /v1/sessions/:id/memory_stores.
+   *
+   * Two layers, both required:
+   *  1. In-process: serialized with build() per session via the session
+   *     lock + map.has fast path — closes the check-then-write TOCTOU a
+   *     plain route-level boolean check would leave open.
+   *  2. Database: the INSERT runs as a single conditional statement that
+   *     only lands while `sessions.memory_frozen_at IS NULL`. build()
+   *     sets that flag BEFORE reading the binding list, so across PG
+   *     replicas (no sticky routing required) a bind either commits
+   *     before every replica's freeze-read (and is mounted + reminded)
+   *     or is rejected — a replica with an empty in-process map can
+   *     never accept a post-freeze bind.
+   *
+   * Returns "bound" (201), "frozen" (409), or "store_not_found" (404).
+   * Store validation happens inside the serialized section so a 201
+   * never persists a row for a store that didn't exist at bind time.
+   */
+  async bindMemoryStore(opts: {
+    sessionId: string;
+    tenantId: string;
+    storeId: string;
+    access: "read_write" | "read_only";
+  }): Promise<"bound" | "frozen" | "store_not_found"> {
+    return this.withSessionLock(opts.sessionId, async () => {
+      if (this.map.has(opts.sessionId)) return "frozen";
+      const store = await this.deps.memoryService.getStore({
+        tenantId: opts.tenantId,
+        storeId: opts.storeId,
+      });
+      if (!store) return "store_not_found";
+      // Single atomic statement — valid in both dialects. The NOT EXISTS
+      // guard reads the persisted freeze flag, so the outcome is decided
+      // by the database, not by this process's view of the world.
+      const r = await this.deps.sql
+        .prepare(
+          `INSERT INTO session_memory_stores (session_id, store_id, access, created_at)
+           SELECT ?, ?, ?, ?
+            WHERE NOT EXISTS (
+              SELECT 1 FROM sessions WHERE id = ? AND memory_frozen_at IS NOT NULL
+            )
+           ON CONFLICT(session_id, store_id) DO UPDATE SET access = excluded.access`,
+        )
+        .bind(opts.sessionId, opts.storeId, opts.access, Date.now(), opts.sessionId)
+        .run();
+      return r.meta.changes > 0 ? "bound" : "frozen";
+    });
   }
 
   /**
@@ -203,9 +288,63 @@ export class SessionRegistry {
     });
   }
 
+  /**
+   * True once this process has built (or is building) the machine for a
+   * session. The binding routes use this to reject post-build memory
+   * binds with 409: mounts are provisioned exactly once in build() and
+   * the machine's reminders snapshot is frozen to that mount list, so a
+   * late binding could never take effect and must not be accepted.
+   */
+  isBuilt(sessionId: string): boolean {
+    return this.map.has(sessionId);
+  }
+
   // ── helpers ─────────────────────────────────────────────────────────
 
   private async build(
+    sessionId: string,
+    tenantId: string,
+  ): Promise<SessionEntry> {
+    // ── DB-level freeze: the multi-replica half of the bind gate ──
+    // Persist memory_frozen_at BEFORE reading the binding list below.
+    // From this commit onward, bindMemoryStore's conditional INSERT is
+    // rejected by the database on ANY replica — including one whose
+    // in-process map is empty — so a late bind can never land a row
+    // that this build won't mount. The in-process session lock covers
+    // the same race within this replica.
+    const frozenAt = Date.now();
+    await this.deps.sql
+      .prepare(
+        `UPDATE sessions SET memory_frozen_at = ? WHERE id = ? AND memory_frozen_at IS NULL`,
+      )
+      .bind(frozenAt, sessionId)
+      .run();
+    try {
+      return await this.buildInner(sessionId, tenantId);
+    } catch (err) {
+      // Build failed before anything was mounted — the session is not
+      // actually frozen. Clear the flag so a retry build can accept new
+      // binds again. Conditioned on OUR value so this never clobbers a
+      // successor freeze (getOrCreate's identity-safe map cleanup makes
+      // the session re-buildable in this replica too).
+      //
+      // Known bounded race: another replica may have piggybacked on
+      // this freeze and built a live machine in the meantime; clearing
+      // then would let a late bind be accepted but never mounted. Needs
+      // build failure AND a concurrent cross-replica build in the same
+      // window — accepted for Phase 0.
+      await this.deps.sql
+        .prepare(
+          `UPDATE sessions SET memory_frozen_at = NULL WHERE id = ? AND memory_frozen_at = ?`,
+        )
+        .bind(sessionId, frozenAt)
+        .run()
+        .catch(() => undefined);
+      throw err;
+    }
+  }
+
+  private async buildInner(
     sessionId: string,
     tenantId: string,
   ): Promise<SessionEntry> {
@@ -221,6 +360,12 @@ export class SessionRegistry {
       .bind(sessionId)
       .all<{ store_id: string; access: string }>();
     const memoryMounts: OrchestratorMemoryMount[] = [];
+    const resolvedMounts: Array<{
+      storeId: string;
+      storeName: string;
+      description?: string | null;
+      readOnly: boolean;
+    }> = [];
     for (const binding of memoryBindings.results ?? []) {
       const store = await this.deps.memoryService.getStore({ tenantId, storeId: binding.store_id });
       if (!store) continue;
@@ -229,7 +374,19 @@ export class SessionRegistry {
         storeId: binding.store_id,
         readOnly: binding.access === "read_only",
       });
+      resolvedMounts.push({
+        storeId: binding.store_id,
+        storeName: store.name,
+        description: store.description,
+        readOnly: binding.access === "read_only",
+      });
     }
+    // Freeze the reminders snapshot to the exact mount list above. It is
+    // captured in the machine's buildHarnessContext closure below, so
+    // every turn of this (cached) machine sees the same reminders — the
+    // prompt can never drift from the provisioned mounts. Late bindings
+    // are rejected with 409 by the binding routes (see isBuilt).
+    const memoryReminders = remindersFromMounts(resolvedMounts);
     await this.deps.sandboxOrchestrator.provision(sandbox, {
       sessionId,
       tenantId,
@@ -272,6 +429,7 @@ export class SessionRegistry {
           sessionId,
           tenantId,
           eventLog,
+          memoryReminders,
         }),
       publish: (event: SessionEvent) => this.deps.hub.publish(sessionId, event),
     });

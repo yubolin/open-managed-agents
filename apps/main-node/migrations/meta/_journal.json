@@ -43,6 +43,13 @@
       "when": 1786694724367,
       "tag": "0005_awesome_warstar",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1786750001000,
+      "tag": "0006_session_memory_freeze",
+      "breakpoints": true
     }
   ]
 }
