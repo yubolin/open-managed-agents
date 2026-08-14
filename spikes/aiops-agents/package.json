@@ -1,0 +1,17 @@
+{
+  "name": "aiops-agents-spike",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "AIOps digital-employee orchestrator sidecar: drives supervisor + expert agents over the OMA public REST boundary (no core code changes)",
+  "scripts": {
+    "ask": "tsx src/cli.ts",
+    "watch": "tsx src/index.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  }
+}
