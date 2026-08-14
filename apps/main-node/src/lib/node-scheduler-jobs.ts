@@ -40,14 +40,6 @@ export interface NodeSchedulerDeps {
    *  in-process LinearProvider is available. Skip when null — most
    *  self-host deployments don't run the Linear gateway side yet. */
   linearSweeper?: (() => Promise<LinearDispatchSweeper | null>) | null;
-  /** Generic host-provided jobs (enterprise line). Registered verbatim —
-   *  name/cron/handler come from the host (e.g. the AIOps subsystem), so
-   *  this file never imports enterprise modules. Null/empty = no-op. */
-  extraJobs?: ReadonlyArray<{
-    name: string;
-    cron: string;
-    handler: () => Promise<void>;
-  }> | null;
   /** Override defaults via env so an operator can quiet noisy crons
    *  during a maintenance window without a code change. */
   env?: NodeJS.ProcessEnv;
@@ -116,16 +108,6 @@ export function buildNodeScheduler(deps: NodeSchedulerDeps) {
       name: "linear-dispatch",
       cron: cron("LINEAR_DISPATCH_CRON", "* * * * *"),
       handler: linearDispatchTick({ resolveSweeper }),
-    });
-  }
-
-  // Host-provided (enterprise) jobs, registered verbatim. Env override:
-  // <JOB>_CRON wins over the job's own cron expression.
-  for (const job of deps.extraJobs ?? []) {
-    scheduler.register({
-      name: job.name,
-      cron: cron(`${job.name.toUpperCase().replace(/-/g, "_")}_CRON`, job.cron),
-      handler: job.handler,
     });
   }
 
