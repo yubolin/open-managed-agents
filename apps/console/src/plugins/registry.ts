@@ -41,6 +41,10 @@ export interface PluginNavItem {
 
 export interface PluginNavGroup {
   label: string;
+  /** Render with a visible SidebarGroupLabel (mirrors NavGroup.showLabel
+   * in AppSidebar — the default flattens plugin items under the shared
+   * "Managed Agents" header). */
+  showLabel?: boolean;
   items: PluginNavItem[];
 }
 

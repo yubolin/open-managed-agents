@@ -46,6 +46,10 @@ interface NavItem {
 interface NavGroup {
   label: string;
   items: NavItem[];
+  /** Render as its own SidebarGroup with a visible SidebarGroupLabel.
+   * Default false — unlabeled groups flatten under the single
+   * "Managed Agents" header. */
+  showLabel?: boolean;
 }
 
 /** Build nav groups with translated labels. Called inside the
@@ -85,6 +89,7 @@ function useNavGroups(): NavGroup[] {
     },
     {
       label: t.nav.integrations,
+      showLabel: true,
       items: [
         { to: "/integrations/linear", label: "Linear", icon: LinearIcon },
         { to: "/integrations/github", label: "GitHub", icon: GitHubIcon },
@@ -93,18 +98,6 @@ function useNavGroups(): NavGroup[] {
       ],
     },
   ];
-}
-
-/** Which group labels should actually render as a SidebarGroupLabel
- *  above their items. Everything else stays flat (label data is just
- *  used for keying / structure today). Per the no-future-proofing
- *  rule, this is a hardcoded allowlist of length 1 — when a second
- *  labeled group materializes, lift to a per-group `showLabel: true`
- *  flag on NavGroup. */
-/** LABELED_GROUPS is checked against the translated label, so we
- *  resolve it at render time inside the component. */
-function getLabeledGroups(t: ReturnType<typeof useI18n>["t"]): Set<string> {
-  return new Set([t.nav.integrations]);
 }
 
 /**
@@ -180,11 +173,10 @@ export function AppSidebar() {
 
   // Split groups into the flat prefix (rendered as one SidebarMenu,
   // no group containers/labels) and the labeled tail (each rendered as
-  // its own SidebarGroup with a SidebarGroupLabel). Today there's only
-  // one labeled group ("Integrations"); the structure still handles N.
-  const labeledGroupNames = getLabeledGroups(t);
-  const flatGroups = groups.filter((g) => !labeledGroupNames.has(g.label));
-  const labeledGroups = groups.filter((g) => labeledGroupNames.has(g.label));
+  // its own SidebarGroup with a SidebarGroupLabel): "Integrations" and
+  // any plugin section (AIOps) that opts in via showLabel.
+  const flatGroups = groups.filter((g) => !g.showLabel);
+  const labeledGroups = groups.filter((g) => g.showLabel);
 
   return (
     <Sidebar

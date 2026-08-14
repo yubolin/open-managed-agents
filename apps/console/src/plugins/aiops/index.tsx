@@ -24,6 +24,7 @@ export const aiopsPlugin: ConsolePlugin = {
   navGroups: [
     {
       label: "AIOps",
+      showLabel: true,
       items: [
         { to: "/aiops/alerts", label: "Alerts", icon: SirenIcon },
         { to: "/aiops/approvals", label: "Approvals", icon: ShieldCheckIcon },
