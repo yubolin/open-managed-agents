@@ -50,6 +50,13 @@
       "when": 1786750001000,
       "tag": "0006_session_memory_freeze",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1786750003000,
+      "tag": "0007_add_approval_requests",
+      "breakpoints": true
     }
   ]
 }

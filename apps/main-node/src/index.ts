@@ -126,6 +126,8 @@ import {
 import type { BrowserHarness } from "@open-managed-agents/browser-harness";
 import { startMemoryBlobWatcher } from "./lib/memory-blob-watcher.js";
 import { buildNodeScheduler } from "./lib/node-scheduler-jobs.js";
+import { resolveCmpAgentTools } from "./lib/cmp-agent-tools.js";
+import type { AiopsSubsystemJobs } from "./lib/aiops-subsystem.js";
 import { startNodeMemoryQueue } from "./lib/node-memory-queue.js";
 import { mkdirSync } from "node:fs";
 import { dirname, relative } from "node:path";
@@ -606,6 +608,9 @@ const sessionRegistry = new SessionRegistry({
     // sessions resolve to {} (a safe no-op spread). Token handling lives inside
     // FeishuApiClient — see lib/feishu-agent-tools.ts.
     const feishuTools = await resolveFeishuAgentTools(input.sessionId);
+    // AIOps digital employees (enterprise line) get the gated CMP tools;
+    // everything else resolves to {} — see lib/cmp-agent-tools.ts.
+    const cmpTools = await resolveCmpAgentTools(input.sessionId, input.agent);
     // Task 2 (§3.8): reminders are the snapshot SessionRegistry.build()
     // froze from the exact mount list it provisioned — never re-read per
     // turn, so the prompt can't drift from the actual mounts (late
@@ -618,6 +623,7 @@ const sessionRegistry = new SessionRegistry({
       tools: {
         ...(input.tools as Record<string, unknown>),
         ...feishuTools,
+        ...cmpTools,
       } as HarnessContext["tools"],
       model: input.model,
       systemPrompt: composeSystemPrompt(rawSystemPrompt, reminders),
@@ -1113,6 +1119,45 @@ if (platformRootSecret && installBridge && process.env.FEISHU_WS_RUNNER === "1")
   }
 }
 
+// ─── AIOps subsystem (enterprise line) ──────────────────────────────────
+// One gated registration keeps the upstream-merge surface minimal: routes,
+// the approval store, the gated CMP tools, and the dispatch/expiry cron
+// jobs all compose inside lib/aiops-subsystem.ts. Inert unless
+// AIOPS_ENABLED=1 (same opt-in pattern as FEISHU_WS_RUNNER). See
+// docs/aiops-closed-loop.md for the closed-loop design + isolation rules.
+let aiopsJobs: AiopsSubsystemJobs[] | null = null;
+if (process.env.AIOPS_ENABLED === "1") {
+  try {
+    const { registerAiopsSubsystem } = await import("./lib/aiops-subsystem.js");
+    const aiops = registerAiopsSubsystem({
+      sql,
+      env: process.env,
+      authDisabled,
+      agents: agentsService,
+      sessions: sessionsService,
+      appendUserMessage: (sid, text) =>
+        sessionRouter
+          .appendEvent(sid, {
+            type: "user.message",
+            content: [{ type: "text", text }],
+          } as import("@open-managed-agents/shared").SessionEvent)
+          .then(() => undefined),
+      localRuntimeEnvId: "env-local-runtime",
+    });
+    v1.route("/aiops", aiops.app);
+    aiopsJobs = aiops.jobs;
+    logger.info(
+      { op: "main-node.aiops.enabled", jobs: aiops.jobs.map((j) => j.name) },
+      "aiops subsystem registered",
+    );
+  } catch (err) {
+    logger.error(
+      { err, op: "main-node.aiops_start_failed" },
+      "aiops subsystem failed to start",
+    );
+  }
+}
+
 if (platformRootSecret) {
   const integrationsRepoEnv: NodeReposEnv = {
     sql,
@@ -1447,6 +1492,7 @@ const scheduler = buildNodeScheduler({
   },
   memory: memoryService,
   integrationsSql: platformRootSecret ? sql : null,
+  extraJobs: aiopsJobs,
 });
 await scheduler.start();
 logger.info({ op: "main-node.scheduler.started" }, "scheduler started");

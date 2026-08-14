@@ -43,6 +43,13 @@
       "when": 1786750000000,
       "tag": "0005_session_memory_freeze",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1786750002000,
+      "tag": "0006_add_approval_requests",
+      "breakpoints": true
     }
   ]
 }
