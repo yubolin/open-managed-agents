@@ -44,6 +44,7 @@
     "@open-managed-agents/model-cards-store": "workspace:*",
     "@open-managed-agents/observability": "workspace:*",
     "@open-managed-agents/oma-cap-adapter": "workspace:*",
+    "@open-managed-agents/operations-store": "workspace:*",
     "@open-managed-agents/queue": "workspace:*",
     "@open-managed-agents/quotas": "workspace:*",
     "@open-managed-agents/rate-limit": "workspace:*",

@@ -521,6 +521,10 @@ export interface SessionThreadCreatedEvent extends EventBase {
   session_thread_id: string;
   agent_id: string;
   agent_name: string;
+  parent_thread_id?: string | null;
+  /** Frozen child-agent identity; full snapshot remains internal storage only. */
+  agent_version?: number;
+  config_hash?: string;
 }
 
 export interface AgentThreadMessageEvent extends EventBase {
@@ -1052,4 +1056,111 @@ export interface StoredEvent {
   type: string;
   data: string; // JSON-serialized SessionEvent
   ts: string;
+}
+
+// ----------------------------------------------------------------------------
+// Operations Workspace DTOs (PRD v0.5 & BFF Spec v0.4)
+// ----------------------------------------------------------------------------
+
+export type WorkspaceRunState =
+  | "draft"
+  | "submitted"
+  | "planning"
+  | "awaiting_approval"
+  | "approved"
+  | "rejected"
+  | "changes_requested"
+  | "executing"
+  | "succeeded"
+  | "failed"
+  | "interrupted"
+  | "cancelled"
+  | "approval_invalidated";
+
+export type WorkspaceApprovalDecision = "approved" | "rejected" | "changes_requested";
+
+export type WorkspaceArtifactType = "plan" | "diagnosis_evidence" | "execution_log";
+
+export interface WorkspaceTemplateDto {
+  id: string;
+  tenant_id: string;
+  name: string;
+  code: string;
+  category: "diagnostic" | "change_plan";
+  description?: string | null;
+  is_active: number;
+  current_version_id?: string | null;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface WorkspaceTemplateVersionDto {
+  id: string;
+  template_id: string;
+  tenant_id: string;
+  version: number;
+  is_active: number;
+  agent_binding: { agent_id: string; version: number };
+  form_schema: Record<string, unknown>;
+  ui_schema?: Record<string, unknown> | null;
+  approval_policy: Record<string, unknown>;
+  timeout_policy: Record<string, unknown>;
+  changelog?: string | null;
+  published_by: string;
+  published_at: number;
+}
+
+export interface WorkspaceRunDto {
+  id: string;
+  tenant_id: string;
+  title: string;
+  created_by: string;
+  service_template_id: string;
+  template_version_id: string;
+  knowledge_refs?: Record<string, unknown> | null;
+  input_parameters: Record<string, unknown>;
+  state: WorkspaceRunState;
+  current_approval_stage: number;
+  session_id?: string | null;
+  snapshot_hash?: string | null;
+  plan_hash?: string | null;
+  evidence_snapshot_id?: string | null;
+  evidence_snapshot_hash?: string | null;
+  active_approval_id?: string | null;
+  failure_reason?: Record<string, unknown> | null;
+  created_at: number;
+  updated_at: number;
+  submitted_at?: number | null;
+  planned_at?: number | null;
+  approved_at?: number | null;
+  started_at?: number | null;
+  finished_at?: number | null;
+}
+
+export interface CreateWorkspaceRunRequest {
+  template_id: string;
+  template_version_id?: string;
+  title: string;
+  input_parameters: Record<string, unknown>;
+  knowledge_refs?: Record<string, unknown>;
+  auto_submit?: boolean;
+}
+
+export interface ReworkWorkspaceRunRequest {
+  input_parameters?: Record<string, unknown>;
+  comment?: string;
+}
+
+export interface CancelWorkspaceRunRequest {
+  reason?: string;
+}
+
+export interface DecideWorkspaceApprovalRequest {
+  action?: "approve" | "reject" | "request_changes";
+  comment?: string;
+}
+
+export interface WorkspaceAuthTicketResponse {
+  ticket: string;
+  expires_in_seconds: number;
 }

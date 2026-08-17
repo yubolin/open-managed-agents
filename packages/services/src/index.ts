@@ -83,6 +83,10 @@ import {
   createCfSessionSecretService,
 } from "@open-managed-agents/session-secrets-store";
 import {
+  OperationsService,
+  createCfOperationsService,
+} from "@open-managed-agents/operations-store";
+import {
   CfSharedAuthDbProvider,
   MetaTableTenantDbProvider,
   type TenantDbProvider,
@@ -132,6 +136,7 @@ export interface Services {
   dreams: DreamService;
   outboundSnapshots: OutboundSnapshotService;
   sessionSecrets: SessionSecretService;
+  operations: OperationsService;
   /** Control-plane: tenant_id → binding_name assignment. Hot-path read on
    *  every authenticated request via MetaTableTenantDbProvider. Always
    *  queries control-plane DB. */
@@ -326,6 +331,7 @@ export function buildServices(env: Env, db: D1Database): Services {
     }),
     outboundSnapshots: createCfOutboundSnapshotService(env),
     sessionSecrets: createCfSessionSecretService(env),
+    operations: createCfOperationsService({ db }),
     // Control-plane services: always query env.ROUTER_DB (not the per-tenant
     // db). Falls back to env.MAIN_DB during the rollout grace period when
     // ROUTER_DB binding may not yet be present in older deployments.

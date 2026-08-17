@@ -10,7 +10,9 @@ import {
   buildMeRoutes,
   buildTenantRoutes,
   mintApiKeyOnStorage,
+  operationsRoutes,
 } from "@open-managed-agents/http-routes";
+import type { Services } from "@open-managed-agents/services";
 import {
   createCfShardPoolService,
   createCfTenantShardDirectoryService,
@@ -388,6 +390,7 @@ app.route("/v1/tenants", tenantsRoutes);
 app.route("/v1/evals", evalsRoutes);
 app.route("/v1/cost_report", costReportRoutes);
 app.route("/v1/integrations", integrationsRoutes);
+app.route("/v1/workspace", operationsRoutes((c) => (c.var as { services: Services }).services.operations));
 app.route("/v1/runtimes", runtimesRoutes);
 app.route("/v1/stats", statsRoutes);
 

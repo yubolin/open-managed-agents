@@ -77,6 +77,7 @@ import {
   buildEvalRoutes,
   buildIntegrationsRoutes,
   buildIntegrationsGatewayRoutes,
+  operationsRoutes,
   type RouteServices,
   type ApiKeyStorage,
   type ApiKeyMeta,
@@ -85,6 +86,7 @@ import {
   mintApiKeyOnStorage,
   sha256Hex,
 } from "@open-managed-agents/http-routes";
+import { createOperationsService } from "@open-managed-agents/operations-store";
 import {
   buildNodeRepos,
   SqlFeishuInstallationRepo,
@@ -567,7 +569,7 @@ const sessionRegistry = new SessionRegistry({
       creds.customHeaders,
     );
   },
-  buildTools: async (agent, sandbox, tenantId) => {
+  buildTools: async (agent, sandbox, tenantId, _sessionId, delegateToAgent) => {
     const creds = await resolveNodeModelCreds(tenantId, agent.model);
     // Task 2 (§3.8): resolve agent.aux_model so web_fetch can summarize
     // large pages. Failure degrades to null (raw markdown), never fails
@@ -585,6 +587,7 @@ const sessionRegistry = new SessionRegistry({
       toMarkdown: toMarkdownProvider,
       auxModel: aux?.model,
       auxModelInfo: aux?.modelInfo,
+      delegateToAgent,
     });
   },
   buildHarness: () => {
@@ -598,6 +601,7 @@ const sessionRegistry = new SessionRegistry({
       log: input.eventLog,
       hub,
       sandbox: input.sandbox,
+      threadId: input.sessionThreadId,
     });
     await runtime.refreshHistory();
     const rawSystemPrompt = input.agent.system ?? "";
@@ -1315,6 +1319,9 @@ app.route("/v1/oma/evals", buildEvalRoutes({
   agents: agentsService,
 }));
 
+const operationsService = createOperationsService(drizzleDb);
+app.route("/v1/workspace", operationsRoutes(() => operationsService));
+
 // /v1/oma/integrations mirror — same factory used twice. New OMA-only
 // endpoints (if any) get added in the package, not here.
 if (platformRootSecret) {
@@ -1547,7 +1554,10 @@ function bridgeAsInstallProxy(bridge: NodeInstallBridge): InstallProxyForwarder 
       // `form-token` mode reads it). Mounted for slack/github/feishu; linear returns
       // 410 inside the bridge.
       const formTokenRe = /^([^/]+)\/publications\/([^/]+)\/form-token$/.exec(subpath);
-      if (formTokenRe && method === "POST") {
+      // The http-routes forwarder omits `method` on this path; the CF
+      // counterpart defaults to POST (apps/main/src/routes/integrations.ts)
+      // — mirror that here so wizard refresh-resume works on Node.
+      if (formTokenRe && (method ?? "POST") === "POST") {
         const result = await bridge.startInstallation!({
           provider: formTokenRe[1] as "linear" | "github" | "slack" | "feishu",
           mode: "form-token",

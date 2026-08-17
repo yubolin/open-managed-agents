@@ -72,3 +72,5 @@ export type {
   WebhookHandlers,
   RateLimitHooks,
 } from "./integrations/gateway";
+
+export { operationsRoutes, verifyTicket } from "./operations";
