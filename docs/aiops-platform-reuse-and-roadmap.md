@@ -1,7 +1,8 @@
 # AIOps 数字员工平台 · 复用矩阵与实施路线
 
-> 状态：架构评审稿 v4（2026-08-17）
+> 状态：架构评审稿 v4.1（2026-08-17）：飞书 ④→②（PR #157 上游事实）
 > 代码快照：`8027dde`，工作区含未提交变更。代码证据区分 HEAD 与工作区版本。
+> 上游事实：PR #157（飞书集成，14 commits）已于 2026-08-16 合入 `openma-ai:main`，含数据库/Provider/Node WS Runner/Console/迁移/文档，真实发送/读取工具、凭据加密、去重、断线退避、自动回复链路；PR 记录全仓测试 1727 passed，并完成真实自建应用 `publish → @mention → threaded reply` E2E。飞书证据以社区主线为准。
 >
 > 证据规则：测试文件存在不等于测试已执行。只有记录了命令、运行时、结果和日期的测试才计为验收证据；本文未附执行记录的测试一律表述为"测试资产存在，本轮未执行，不计目标环境验收"。
 
@@ -31,6 +32,7 @@
 
 | 能力 | 代码证据 | 验收状态与缺口 |
 |------|----------|----------------|
+| 飞书集成（社区主线原生能力，非私有分支/项目定制） | PR #157（2026-08-16 合入 `openma-ai:main`，14 commits）：Provider、Node WS Runner、Console、迁移、文档；真实发送/读取工具、凭据加密、去重、断线退避、自动回复链路；全仓测试 1727 passed + 真实自建应用 E2E（publish → @mention → threaded reply） | 社区代码、测试与真实 E2E 已成立（②）。目标部署环境产品化验收未完成：凭据联调、租户隔离、稳定性、HA（WS Runner 单副本、无 leader election）、延迟采样、安全。升①最低验收覆盖：签名校验、重复事件、断线重连、租户隔离、消息幂等、发送失败恢复、审批身份校验、延迟采样 |
 | 单 Agent Runtime | session-runtime 状态机/事件溯源 | 测试资产存在（单元/集成/E2E），本轮未执行，不计目标环境验收。已知缺口限定：`POST /messages` 一次性 SSE 边界未发 `session.status_idle`（docs/aiops-digital-employees.md:141）；长期 `/events/stream` 为另一通道（packages/http-routes/src/sessions/index.ts:837），不受该缺口影响 |
 | AuthN · 邮箱密码 | auth-config.ts:42 | 待补（无列示 E2E） |
 | AuthN · Email OTP | 依赖 SMTP 绑定 | 待补（无真实邮件 E2E） |
@@ -62,7 +64,6 @@
 
 | 能力 | 现状与升级路径 |
 |------|----------------|
-| 飞书生产能力 | 集成路径和主要组件已存在，生产能力尚未验收。已知问题：`/messages` SSE 终止问题；仅镜像第一条 Agent 消息；派单协议块可能暴露在消息中；生产凭据未联调（docs/aiops-digital-employees.md:153）。升①最低验收覆盖：签名校验、重复事件、断线重连、租户隔离、消息幂等、发送失败恢复、审批身份校验、延迟采样 |
 | 多 agent 委派 · Node | delegateToAgent 未接入 session-runtime/main-node，无可验收闭环（Phase 0 SDS 范围） |
 | 外挂会诊编排 | sidecar=909 行/71.2s/2026-08-14/单次本地 CLI spike，外挂 REST 轮询，非生产验收（注意：该 spike 验证的是外挂多 agent 会诊，不作为单 Agent Runtime 证据） |
 | 租户分片迁移/故障恢复 | 设计存在（tenant-db/shard_pool），生产验收未做 |
