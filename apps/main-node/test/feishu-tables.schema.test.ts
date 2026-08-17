@@ -44,6 +44,37 @@ afterAll(() => {
 describe("feishu ops tables @ sqlite (foreign_keys = ON — schema correctness)", () => {
   describeFeishuTablesCriteria(() => testDb!.sql, randomUUID());
 
+  it("lands the session snapshot lifecycle columns", async () => {
+    const columns = await testDb!.sql
+      .prepare(`PRAGMA table_info(sessions)`)
+      .all<{ name: string }>();
+    const names = (columns.results ?? []).map((column) => column.name);
+
+    expect(names).toEqual(
+      expect.arrayContaining([
+        "snapshot_state",
+        "snapshot_hash",
+        "snapshot_finalized_at",
+      ]),
+    );
+  });
+
+  it("persists the frozen child-agent snapshot on session_threads", async () => {
+    const columns = await testDb!.sql
+      .prepare(`PRAGMA table_info(session_threads)`)
+      .all<{ name: string }>();
+    const names = (columns.results ?? []).map((column) => column.name);
+
+    expect(names).toEqual(
+      expect.arrayContaining([
+        "agent_version",
+        "agent_snapshot",
+        "config_hash",
+        "hash_algorithm",
+      ]),
+    );
+  });
+
   it("⑧ migration is idempotent and lands all four tables + constraints + triggers", async () => {
     // Re-running migrate must be a no-op (drizzle tracks via
     // __drizzle_migrations) — no error, no duplicate-table blow-up.
@@ -99,10 +130,17 @@ describe("feishu ops tables @ sqlite (foreign_keys = ON — schema correctness)"
     // Enforcement triggers landed — the complete declarative-FK mirror
     // (blocker 1): child INSERT + UPDATE existence, parent DELETE
     // (CASCADE / SET NULL / NO ACTION), parent UPDATE (NO ACTION), and the
-    // self-ref cascade.
+    // self-ref cascade. Scoped to this migration's 17 names — the folder is
+    // shared (operations 0006 adds its own trg_fk* mirror).
     const triggers = await testDb!.sql
       .prepare(
-        `SELECT name FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'trg_fk%' ORDER BY name`,
+        `SELECT name FROM sqlite_master WHERE type = 'trigger' AND name IN (
+           'trg_fkd_gev_refs','trg_fkd_session_gev','trg_fkd_session_sthr','trg_fkd_sthr_parent',
+           'trg_fki_fme_group','trg_fki_gev_supervisor','trg_fki_mc_group','trg_fki_sthr_parent',
+           'trg_fki_sthr_session','trg_fku_fme_group','trg_fku_gev_refs','trg_fku_gev_supervisor',
+           'trg_fku_mc_group','trg_fku_session_id','trg_fku_sthr_parent','trg_fku_sthr_pk',
+           'trg_fku_sthr_session'
+         ) ORDER BY name`,
       )
       .all<{ name: string }>();
     const triggerNames = (triggers.results ?? []).map((r) => r.name);

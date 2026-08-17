@@ -28,8 +28,12 @@ export interface TestDb {
 export interface BootstrapTestDbOptions {
   /**
    * Flip `PRAGMA foreign_keys = ON` on both the drizzle connection and the
-   * SqlClient connection. Defaults to false (matches D1's runtime default —
-   * see packages/sql-client/src/adapters/better-sqlite3.ts).
+   * SqlClient connection. Defaults to false — the better-sqlite3 adapter
+   * hardcodes FK OFF (packages/sql-client/src/adapters/better-sqlite3.ts),
+   * so this default tracks the adapter. Note Cloudflare docs state D1
+   * itself enforces FKs by default while the adapter comment records the
+   * opposite empirical claim; the operations tables carry trigger mirrors
+   * so integrity holds under either regime (run-model spec v0.4.3 §8-4).
    *
    * Migration / cascade tests that need to assert FK enforcement (ON DELETE
    * CASCADE / SET NULL, composite FK rejection) pass true.

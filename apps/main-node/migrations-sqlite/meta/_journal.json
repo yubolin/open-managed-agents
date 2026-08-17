@@ -36,6 +36,20 @@
       "when": 1786750000000,
       "tag": "0005_session_memory_freeze",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "6",
+      "when": 1786945403015,
+      "tag": "0006_session_snapshot_lifecycle",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1786977468857,
+      "tag": "0006_operations_workspace",
+      "breakpoints": true
     }
   ]
 }

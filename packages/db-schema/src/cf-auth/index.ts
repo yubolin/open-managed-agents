@@ -22,3 +22,4 @@ export * from "./runtimes";
 export * from "./evals";
 export * from "./usage";
 export * from "./kv";
+export * from "./operations";
