@@ -353,7 +353,7 @@ export async function buildTools(
      *  turndown/pdf-parse/mammoth. Optional — when absent the tool falls
      *  back to raw curl + a warning to the model. */
     toMarkdown?: ToMarkdownProvider;
-    delegateToAgent?: (agentId: string, message: string) => Promise<string>;
+    delegateToAgent?: (agentId: string, message: string, version?: number) => Promise<string>;
     environmentConfig?: { networking?: { type: string; allowed_hosts?: string[] } };
     /** MCP routing context — wired from SessionDO. AI SDK's MCP HTTP
      *  transport gets a custom `fetch` that calls
@@ -1205,7 +1205,7 @@ export async function buildTools(
             return "Multi-agent delegation not available: no thread executor configured";
           }
           try {
-            return await env.delegateToAgent(ca.id, message);
+            return await env.delegateToAgent(ca.id, message, ca.version);
           } catch (e) {
             return `Sub-agent error: ${e instanceof Error ? e.message : String(e)}`;
           }

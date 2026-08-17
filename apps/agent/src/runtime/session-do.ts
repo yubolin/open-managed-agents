@@ -23,6 +23,7 @@ import {
   ModelError,
   TransientInfraError,
   fileR2Key,
+  hashJsonSnapshot,
 } from "@open-managed-agents/shared";
 import {
   CfDoStreamRepo,
@@ -396,18 +397,32 @@ export class SessionDO extends DurableObject<Env> {
    * sandbox serving both prod-main and staging-main). Snapshots flow the
    * data through the init body and avoid the KV cross-binding issue.
    */
-  private async getAgentConfig(agentId: string): Promise<AgentConfig | null> {
-    if (this.state.agent_snapshot && agentId === this.state.agent_id) {
+  private async getAgentConfig(
+    agentId: string,
+    requestedVersion?: number,
+  ): Promise<AgentConfig | null> {
+    if (
+      this.state.agent_snapshot &&
+      agentId === this.state.agent_id &&
+      (requestedVersion === undefined || requestedVersion === this.state.agent_snapshot.version)
+    ) {
       return this.state.agent_snapshot;
     }
-    // Cross-tenant lookup — DO has no tenant scope here. Trusts the caller.
-    // Phase 1: still queries against the shared MAIN_DB. Phase 4: per-tenant
-    // DB will scope this naturally — `WHERE id = ?` in the tenant's DB only
-    // returns the tenant's row. Either way, this.state.tenant_id is the
-    // right routing key.
     const services = await getCfServicesForTenant(this.env, this.state.tenant_id);
-    const row = await services.agents.getById({ agentId });
+    const row = await services.agents.get({
+      tenantId: this.state.tenant_id,
+      agentId,
+    });
     if (!row) return null;
+    if (requestedVersion !== undefined && requestedVersion !== row.version) {
+      if (requestedVersion > row.version) return null;
+      const historical = await services.agents.getVersion({
+        tenantId: this.state.tenant_id,
+        agentId,
+        version: requestedVersion,
+      });
+      return historical?.snapshot ?? null;
+    }
     const { tenant_id: _t, ...config } = row;
     return config;
   }
@@ -1521,6 +1536,38 @@ export class SessionDO extends DurableObject<Env> {
     // PUT /init — initialize session
     if (request.method === "PUT" && url.pathname === "/init") {
       const params = (await request.json()) as SessionInitParams;
+      let persistedAgentSnapshot = params.agent_snapshot;
+      // Current control-plane callers always send both ownership fields. At
+      // this trusted boundary, re-read the row and ignore the caller's copy:
+      // only a finalized snapshot may initialize a Runtime. The legacy branch
+      // (missing ownership fields) remains temporarily for pre-lifecycle
+      // internal callers and direct DO compatibility tests.
+      if (params.session_id && params.tenant_id) {
+        const services = await getCfServicesForTenant(this.env, params.tenant_id);
+        const session = await services.sessions.get({
+          tenantId: params.tenant_id,
+          sessionId: params.session_id,
+        });
+        if (!session) {
+          return new Response(JSON.stringify({ error: "session_not_found" }), {
+            status: 404,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        if (session.snapshot_state !== "finalized" || !session.agent_snapshot) {
+          return new Response(JSON.stringify({ error: "snapshot_not_finalized" }), {
+            status: 409,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        if (session.agent_id !== params.agent_id) {
+          return new Response(JSON.stringify({ error: "session_agent_mismatch" }), {
+            status: 409,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        persistedAgentSnapshot = session.agent_snapshot;
+      }
       this.setState({
         ...this.state,
         agent_id: params.agent_id,
@@ -1529,7 +1576,7 @@ export class SessionDO extends DurableObject<Env> {
         session_id: params.session_id || this.state.session_id,
         tenant_id: params.tenant_id ?? "default",
         vault_ids: params.vault_ids ?? [],
-        agent_snapshot: params.agent_snapshot,
+        agent_snapshot: persistedAgentSnapshot,
         environment_snapshot: params.environment_snapshot,
         vault_credentials: params.vault_credentials,
         event_hooks: params.event_hooks,
@@ -3886,6 +3933,7 @@ export class SessionDO extends DurableObject<Env> {
     parentHistory: HistoryStore,
     sandbox: SandboxExecutor,
     parentThreadId: string = "sthr_primary",
+    requestedVersion?: number,
   ): Promise<string> {
     // Generate a unique thread ID. Prefix `sthr_` matches AMA spec
     // (BetaManagedAgentsSessionThread.id is `sthr_*`); previous prefix
@@ -3949,7 +3997,7 @@ export class SessionDO extends DurableObject<Env> {
       // with arbitrary ids aren't snapshotted).
       // TODO(staging-kv): pre-fetch sub-agent configs at /init when the agent
       // declares them in mcp_servers / sub_agents.
-      subAgent = await this.getAgentConfig(agentId);
+      subAgent = await this.getAgentConfig(agentId, requestedVersion);
       if (!subAgent) {
         return `Sub-agent error: agent "${agentId}" not found`;
       }
@@ -3958,13 +4006,21 @@ export class SessionDO extends DurableObject<Env> {
     // In-memory map (hot path config lookup) + persistent threads row
     // (Phase 1 — survives DO eviction, lets HTTP CRUD see this thread).
     // INSERT OR IGNORE for safety against rare ID collision.
+    const frozenSubAgent = await hashJsonSnapshot(subAgent);
+    subAgent = frozenSubAgent.normalized;
     this.threads.set(threadId, { agentId, agentConfig: subAgent });
     this.ctx.storage.sql.exec(
-      `INSERT OR IGNORE INTO threads (id, agent_id, agent_name, parent_thread_id, created_at)
-       VALUES (?, ?, ?, ?, ?)`,
+      `INSERT OR IGNORE INTO threads
+        (id, agent_id, agent_name, agent_version, agent_snapshot,
+         config_hash, hash_algorithm, parent_thread_id, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       threadId,
       agentId,
       subAgent.name,
+      subAgent.version,
+      JSON.stringify(subAgent),
+      frozenSubAgent.configHash,
+      frozenSubAgent.hashAlgorithm,
       parentThreadId,
       Date.now(),
     );
@@ -3978,6 +4034,8 @@ export class SessionDO extends DurableObject<Env> {
       session_thread_id: threadId,
       agent_id: agentId,
       agent_name: subAgent.name,
+      agent_version: subAgent.version,
+      config_hash: frozenSubAgent.configHash,
       parent_thread_id: parentThreadId,
     } as SessionEvent;
     parentHistory.append(threadCreatedEvent);
@@ -4027,10 +4085,10 @@ export class SessionDO extends DurableObject<Env> {
       // the right subHistory. Until then, omit the closures entirely so
       // tools.schedule / cancel_schedule / list_schedules don't get
       // registered into subTools at all.
-      delegateToAgent: async (nestedAgentId: string, nestedMessage: string) => {
+      delegateToAgent: async (nestedAgentId: string, nestedMessage: string, nestedVersion?: number) => {
         // Nested delegate: this sub-agent's threadId becomes the new
         // child's parent. Lineage chain matches what Console renders.
-        return this.runSubAgent(nestedAgentId, nestedMessage, parentHistory, sandbox, threadId);
+        return this.runSubAgent(nestedAgentId, nestedMessage, parentHistory, sandbox, threadId, nestedVersion);
       },
     });
     const subModelId = typeof subAgent.model === "string" ? subAgent.model : subAgent.model?.id;
@@ -4082,10 +4140,10 @@ export class SessionDO extends DurableObject<Env> {
                 r2: this.env.FILES_BUCKET ?? null,
               },
             }),
-        delegateToAgent: async (nestedAgentId: string, nestedMessage: string) => {
+        delegateToAgent: async (nestedAgentId: string, nestedMessage: string, nestedVersion?: number) => {
           // Nested delegate inside the env block; see runtime block
           // above for the same lineage rule.
-          return this.runSubAgent(nestedAgentId, nestedMessage, parentHistory, sandbox, threadId);
+          return this.runSubAgent(nestedAgentId, nestedMessage, parentHistory, sandbox, threadId, nestedVersion);
         },
       },
       runtime: {
@@ -4277,11 +4335,11 @@ export class SessionDO extends DurableObject<Env> {
       scheduleWakeup: (a) => this.scheduleWakeup(a),
       cancelWakeup: (id) => this.cancelWakeup(id),
       listWakeups: () => this.listWakeups(),
-      delegateToAgent: async (agentId: string, message: string) => {
+      delegateToAgent: async (agentId: string, message: string, version?: number) => {
         // turnThreadId is captured from the enclosing processUserMessage
         // scope (declared at the top of the function) — closure evals
         // lazily at harness.run time, so TDZ isn't a concern.
-        return this.runSubAgent(agentId, message, history, sandbox, turnThreadId);
+        return this.runSubAgent(agentId, message, history, sandbox, turnThreadId, version);
       },
       watchBackgroundTask: (taskId: string, pid: string, outputFile: string, proc: ProcessHandle | null) => {
         this.watchBackgroundTask(taskId, pid, outputFile, proc, sandbox);
@@ -4529,8 +4587,8 @@ export class SessionDO extends DurableObject<Env> {
                 r2: this.env.FILES_BUCKET ?? null,
               },
             }),
-        delegateToAgent: async (agentId: string, message: string) => {
-          return this.runSubAgent(agentId, message, history, sandbox, turnThreadId);
+        delegateToAgent: async (agentId: string, message: string, version?: number) => {
+          return this.runSubAgent(agentId, message, history, sandbox, turnThreadId, version);
         },
         watchBackgroundTask: (taskId: string, pid: string, outputFile: string, proc: ProcessHandle | null) => {
           this.watchBackgroundTask(taskId, pid, outputFile, proc, sandbox);
@@ -5137,11 +5195,32 @@ export class SessionDO extends DurableObject<Env> {
         id TEXT PRIMARY KEY,
         agent_id TEXT NOT NULL,
         agent_name TEXT,
+        agent_version INTEGER,
+        agent_snapshot TEXT,
+        config_hash TEXT,
+        hash_algorithm TEXT,
         parent_thread_id TEXT,
         created_at INTEGER NOT NULL,
         archived_at INTEGER
       )
     `);
+    // CREATE TABLE IF NOT EXISTS does not evolve already-created DO SQLite
+    // tables. Add the replay-evidence columns one at a time, guarded by
+    // PRAGMA so every cold start remains idempotent.
+    const threadColumns = new Set<string>();
+    for (const row of sql.exec(`PRAGMA table_info(threads)`)) {
+      threadColumns.add(row.name as string);
+    }
+    for (const [name, type] of [
+      ["agent_version", "INTEGER"],
+      ["agent_snapshot", "TEXT"],
+      ["config_hash", "TEXT"],
+      ["hash_algorithm", "TEXT"],
+    ] as const) {
+      if (!threadColumns.has(name)) {
+        sql.exec(`ALTER TABLE threads ADD COLUMN ${name} ${type}`);
+      }
+    }
     sql.exec(`CREATE INDEX IF NOT EXISTS idx_threads_parent ON threads(parent_thread_id, created_at)`);
   }
 

@@ -379,12 +379,19 @@ export class NodeSessionRouter implements SessionRouter {
   async listThreads(sessionId: string): Promise<unknown> {
     const rows = await this.deps.sql
       .prepare(
-        `SELECT DISTINCT COALESCE(session_thread_id, 'sthr_primary') AS id
-           FROM session_events WHERE session_id = ?`,
+        `SELECT id, agent_id, agent_name, parent_thread_id, created_at, archived_at
+           FROM session_threads WHERE session_id = ? ORDER BY created_at, id`,
       )
       .bind(sessionId)
-      .all<{ id: string }>();
-    return { data: (rows.results ?? []).map((r) => ({ id: r.id })) };
+      .all<{
+        id: string;
+        agent_id: string;
+        agent_name: string | null;
+        parent_thread_id: string | null;
+        created_at: number;
+        archived_at: number | null;
+      }>();
+    return { data: rows.results ?? [] };
   }
 
   async getThread(
@@ -393,27 +400,34 @@ export class NodeSessionRouter implements SessionRouter {
   ): Promise<{ status: number; body: string }> {
     const r = await this.deps.sql
       .prepare(
-        `SELECT 1 AS one FROM session_events
-          WHERE session_id = ? AND COALESCE(session_thread_id, 'sthr_primary') = ? LIMIT 1`,
+        `SELECT id, agent_id, agent_name, parent_thread_id, created_at, archived_at
+           FROM session_threads WHERE session_id = ? AND id = ? LIMIT 1`,
       )
       .bind(sessionId, threadId)
-      .first<{ one: number }>();
-    if (!r && threadId !== "sthr_primary") {
+      .first<Record<string, unknown>>();
+    if (!r) {
       return { status: 404, body: JSON.stringify({ error: "Thread not found" }) };
     }
-    return { status: 200, body: JSON.stringify({ id: threadId }) };
+    return { status: 200, body: JSON.stringify(r) };
   }
 
   async archiveThread(
-    _sessionId: string,
+    sessionId: string,
     threadId: string,
   ): Promise<{ status: number; body: string }> {
     if (threadId === "sthr_primary") {
       return { status: 400, body: JSON.stringify({ error: "Cannot archive primary thread" }) };
     }
-    // Node has no thread-row to flip; reflect the call back as 200 so
-    // SDK callers can chain idempotently. Future SQL migration could
-    // add a session_threads table for hard archive semantics.
+    const result = await this.deps.sql
+      .prepare(
+        `UPDATE session_threads SET archived_at = COALESCE(archived_at, ?)
+          WHERE session_id = ? AND id = ?`,
+      )
+      .bind(Date.now(), sessionId, threadId)
+      .run();
+    if ((result.meta?.changes ?? 0) === 0) {
+      return { status: 404, body: JSON.stringify({ error: "Thread not found" }) };
+    }
     return { status: 200, body: JSON.stringify({ id: threadId, archived: true }) };
   }
 

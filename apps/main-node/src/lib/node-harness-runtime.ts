@@ -29,10 +29,19 @@ const log = getLogger("node-harness");
  */
 class SqlHistoryStore implements HistoryStore {
   private cache: SessionEvent[] = [];
-  constructor(private log: SqlEventLog) {}
+  constructor(
+    private log: SqlEventLog,
+    private threadId?: string,
+  ) {}
 
   async refresh(): Promise<void> {
-    this.cache = await this.log.getEventsAsync();
+    const events = await this.log.getEventsAsync();
+    this.cache = this.threadId
+      ? events.filter(
+          (event) =>
+            (event as { session_thread_id?: string }).session_thread_id === this.threadId,
+        )
+      : events;
   }
 
   appendInPlace(event: SessionEvent): void {
@@ -62,6 +71,8 @@ export interface NodeHarnessRuntimeOptions {
    *  LocalSubprocessSandbox for local dev, E2BSandbox / CloudflareSandbox
    *  in production. */
   sandbox: SandboxExecutor;
+  /** Child-agent history/event scope. Omitted for the primary thread. */
+  threadId?: string;
 }
 
 export class NodeHarnessRuntime implements HarnessRuntime {
@@ -84,7 +95,7 @@ export class NodeHarnessRuntime implements HarnessRuntime {
   private writeChain: Promise<void> = Promise.resolve();
 
   constructor(private opts: NodeHarnessRuntimeOptions) {
-    this.history = new SqlHistoryStore(opts.log);
+    this.history = new SqlHistoryStore(opts.log, opts.threadId);
     this.sandbox = opts.sandbox;
   }
 
@@ -104,9 +115,12 @@ export class NodeHarnessRuntime implements HarnessRuntime {
    * comment above).
    */
   broadcast = (event: SessionEvent): void => {
-    this.history.appendInPlace(event);
+    const scopedEvent = this.opts.threadId
+      ? ({ ...event, session_thread_id: this.opts.threadId } as SessionEvent)
+      : event;
+    this.history.appendInPlace(scopedEvent);
     this.writeChain = this.writeChain
-      .then(() => this.opts.log.appendAsync(event))
+      .then(() => this.opts.log.appendAsync(scopedEvent))
       .then(() => this.opts.log.getEventsAsync())
       .then((all) => {
         const last = all[all.length - 1];
@@ -120,6 +134,11 @@ export class NodeHarnessRuntime implements HarnessRuntime {
         // hit).
       });
   };
+
+  /** Wait until all fire-and-forget broadcast writes are durable. */
+  async flush(): Promise<void> {
+    await this.writeChain;
+  }
 
   // Stream lifecycle events: broadcast-only (NOT persisted to events log,
   // matching the CF contract — the eventual agent.message is the canonical

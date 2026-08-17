@@ -650,6 +650,14 @@ class InProcessSessionCreator implements SessionCreator {
       environmentSnapshot: envSnapshot as never,
       metadata: meta as never,
     });
+    if (!session.snapshot_hash) {
+      throw new Error(`session_snapshot_hash_missing: ${session.id}`);
+    }
+    await this.opts.sessions.finalizeSnapshot({
+      tenantId,
+      sessionId: session.id,
+      expectedHash: session.snapshot_hash,
+    });
     return { sessionId: session.id as SessionId };
   }
 

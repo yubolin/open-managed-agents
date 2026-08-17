@@ -232,7 +232,7 @@ export interface HarnessContext {
     ANTHROPIC_BASE_URL?: string;
     ANTHROPIC_MODEL?: string;
     TAVILY_API_KEY?: string;
-    delegateToAgent?: (agentId: string, message: string) => Promise<string>;
+    delegateToAgent?: (agentId: string, message: string, version?: number) => Promise<string>;
     CONFIG_KV?: KVNamespace;
     memoryStoreIds?: string[];
     environmentConfig?: { networking?: { type: string; allowed_hosts?: string[] } };

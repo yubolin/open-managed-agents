@@ -40,6 +40,7 @@ import type {
   SessionEvent,
   UserMessageEvent,
 } from "@open-managed-agents/shared";
+import { extractTextFromContent, hashJsonSnapshot } from "@open-managed-agents/shared";
 import type { LanguageModel } from "ai";
 import { getLogger } from "@open-managed-agents/observability";
 import type { EventStreamHub } from "./lib/event-stream-hub.js";
@@ -81,6 +82,8 @@ export interface SessionRegistryDeps {
     agent: AgentConfig,
     sandbox: SandboxExecutor,
     tenantId: string,
+    sessionId: string,
+    delegateToAgent?: (agentId: string, message: string, version?: number) => Promise<string>,
   ): Promise<unknown>;
 
   /** Build harness instance + context. Each is platform-neutral so the
@@ -99,6 +102,7 @@ export interface SessionRegistryDeps {
      *  mount list this machine provisioned (no per-turn re-read: bindings
      *  added after build are rejected with 409 by the binding routes). */
     memoryReminders: MemoryReminder[];
+    sessionThreadId?: string;
   }): Promise<unknown>;
 
   /** Sandbox workdir root, e.g. /app/data/sandboxes. Per-session dirs
@@ -234,8 +238,8 @@ export class SessionRegistry {
     if (rows.length === 0) return;
     log.info({ op: "session_registry.bootstrap", recovering: rows.length }, `bootstrap: recovering ${rows.length} interrupted session(s)`);
     for (const row of rows) {
-      const entry = await this.getOrCreate(row.id, row.tenant_id);
       try {
+        const entry = await this.getOrCreate(row.id, row.tenant_id);
         await entry.machine.onWake();
       } catch (err) {
         log.error(
@@ -299,6 +303,118 @@ export class SessionRegistry {
     return this.map.has(sessionId);
   }
 
+  /** Phase 0 Node delegation: one child level, isolated thread history. */
+  private async runSubAgent(opts: {
+    sessionId: string;
+    tenantId: string;
+    agentId: string;
+    version?: number;
+    message: string;
+    parentThreadId: string;
+  }): Promise<string> {
+    const entry = await this.getOrCreate(opts.sessionId, opts.tenantId);
+    const current = await this.deps.agentsService.get({
+      tenantId: opts.tenantId,
+      agentId: opts.agentId,
+    });
+    if (!current) throw new Error(`agent ${opts.agentId} not found`);
+
+    let resolved: AgentConfig;
+    if (opts.version === undefined || opts.version === current.version) {
+      const { tenant_id: _tenantId, ...snapshot } = current;
+      resolved = snapshot;
+    } else if (opts.version < current.version) {
+      const historical = await this.deps.agentsService.getVersion({
+        tenantId: opts.tenantId,
+        agentId: opts.agentId,
+        version: opts.version,
+      });
+      if (!historical) throw new Error(`agent version ${opts.version} not found`);
+      resolved = historical.snapshot;
+    } else {
+      throw new Error(`agent version ${opts.version} not found`);
+    }
+
+    const frozen = await hashJsonSnapshot(resolved);
+    const threadId = `sthr_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`;
+    const createdAt = Date.now();
+    await this.deps.sql
+      .prepare(
+        `INSERT INTO session_threads
+          (session_id, id, agent_id, agent_name, agent_version, agent_snapshot,
+           config_hash, hash_algorithm, parent_thread_id, input_tokens,
+           output_tokens, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?)`,
+      )
+      .bind(
+        opts.sessionId,
+        threadId,
+        opts.agentId,
+        frozen.normalized.name,
+        frozen.normalized.version,
+        JSON.stringify(frozen.normalized),
+        frozen.configHash,
+        frozen.hashAlgorithm,
+        opts.parentThreadId,
+        createdAt,
+      )
+      .run();
+
+    const threadCreated = {
+      type: "session.thread_created",
+      session_thread_id: threadId,
+      agent_id: opts.agentId,
+      agent_name: frozen.normalized.name,
+      agent_version: frozen.normalized.version,
+      config_hash: frozen.configHash,
+      parent_thread_id: opts.parentThreadId,
+    } as unknown as SessionEvent;
+    await entry.eventLog.appendAsync(threadCreated);
+    this.deps.hub.publish(opts.sessionId, threadCreated);
+
+    const userMessage = {
+      type: "user.message",
+      session_thread_id: threadId,
+      content: [{ type: "text", text: opts.message }],
+    } as unknown as UserMessageEvent;
+    await entry.eventLog.appendAsync(userMessage);
+    this.deps.hub.publish(opts.sessionId, userMessage);
+
+    // Phase 0 is deliberately one level on Node. Preserve the frozen roster
+    // in storage, but do not expose nested call_agent_* tools to this run.
+    const executionAgent = { ...frozen.normalized, callable_agents: [] };
+    const tools = await this.deps.buildTools(
+      executionAgent,
+      entry.sandbox,
+      opts.tenantId,
+      opts.sessionId,
+    );
+    const model = await this.deps.buildModel(executionAgent, opts.tenantId);
+    const context = await this.deps.buildHarnessContext({
+      agent: executionAgent,
+      userMessage,
+      sandbox: entry.sandbox,
+      tools,
+      model,
+      sessionId: opts.sessionId,
+      tenantId: opts.tenantId,
+      eventLog: entry.eventLog,
+      memoryReminders: [],
+      sessionThreadId: threadId,
+    });
+    await this.deps.buildHarness().run(context);
+    const runtime = (context as { runtime?: { flush?: () => Promise<void> } }).runtime;
+    await runtime?.flush?.();
+
+    const events = await entry.eventLog.getEventsAsync();
+    const reply = [...events].reverse().find(
+      (event) =>
+        event.type === "agent.message" &&
+        (event as { session_thread_id?: string }).session_thread_id === threadId,
+    ) as { content?: unknown } | undefined;
+    return reply?.content ? extractTextFromContent(reply.content as never) : "";
+  }
+
   // ── helpers ─────────────────────────────────────────────────────────
 
   private async build(
@@ -348,6 +464,83 @@ export class SessionRegistry {
     sessionId: string,
     tenantId: string,
   ): Promise<SessionEntry> {
+    const sessionRow = await this.deps.sql
+      .prepare(
+        `SELECT agent_id, agent_snapshot, snapshot_state, snapshot_hash
+           FROM sessions WHERE id = ? AND tenant_id = ?`,
+      )
+      .bind(sessionId, tenantId)
+      .first<{
+        agent_id: string | null;
+        agent_snapshot: string | null;
+        snapshot_state: string | null;
+        snapshot_hash: string | null;
+      }>();
+    if (!sessionRow) throw new Error(`session ${sessionId} not found in tenant`);
+    // Rolling-upgrade bridge for rows created before the lifecycle columns.
+    // The conditional UPDATE makes this safe across replicas; non-null legacy
+    // snapshots become finalized directly and never pass through building.
+    if (sessionRow.snapshot_state === null) {
+      if (sessionRow.agent_snapshot) {
+        const legacySnapshot = JSON.parse(sessionRow.agent_snapshot) as AgentConfig;
+        const hashed = await hashJsonSnapshot(legacySnapshot);
+        const migratedAt = Date.now();
+        await this.deps.sql
+          .prepare(
+            `UPDATE sessions
+                SET agent_snapshot = ?, snapshot_state = 'finalized',
+                    snapshot_hash = ?, snapshot_finalized_at = ?
+              WHERE id = ? AND tenant_id = ? AND snapshot_state IS NULL`,
+          )
+          .bind(
+            JSON.stringify(hashed.normalized),
+            hashed.configHash,
+            migratedAt,
+            sessionId,
+            tenantId,
+          )
+          .run();
+        sessionRow.agent_snapshot = JSON.stringify(hashed.normalized);
+        sessionRow.snapshot_state = "finalized";
+        sessionRow.snapshot_hash = hashed.configHash;
+      } else {
+        await this.deps.sql
+          .prepare(
+            `UPDATE sessions SET snapshot_state = 'legacy_unversioned'
+              WHERE id = ? AND tenant_id = ? AND snapshot_state IS NULL`,
+          )
+          .bind(sessionId, tenantId)
+          .run();
+        sessionRow.snapshot_state = "legacy_unversioned";
+      }
+    }
+    const frozenPrimaryAgent =
+      sessionRow.snapshot_state === "finalized" && sessionRow.agent_snapshot
+        ? (JSON.parse(sessionRow.agent_snapshot) as AgentConfig)
+        : null;
+    if (frozenPrimaryAgent) {
+      await this.deps.sql
+        .prepare(
+          `INSERT INTO session_threads
+            (session_id, id, agent_id, agent_name, agent_version, agent_snapshot,
+             config_hash, hash_algorithm, parent_thread_id, input_tokens,
+             output_tokens, created_at)
+           VALUES (?, 'sthr_primary', ?, ?, ?, ?, ?, 'sha256:jcs-rfc8785:v1',
+                   NULL, 0, 0, ?)
+           ON CONFLICT (session_id, id) DO NOTHING`,
+        )
+        .bind(
+          sessionId,
+          sessionRow.agent_id,
+          frozenPrimaryAgent.name,
+          frozenPrimaryAgent.version,
+          sessionRow.agent_snapshot,
+          sessionRow.snapshot_hash,
+          Date.now(),
+        )
+        .run();
+    }
+
     const sandboxWorkdir = join(this.deps.sandboxWorkdirRoot, sessionId);
     const sandbox = await this.deps.buildSandbox(sessionId, sandboxWorkdir);
 
@@ -412,6 +605,12 @@ export class SessionRegistry {
       adapter,
       sandbox,
       loadAgent: async (agentId) => {
+        if (agentId === sessionRow.agent_id) {
+          if (!frozenPrimaryAgent) {
+            throw new Error(`session ${sessionId} snapshot is not finalized`);
+          }
+          return frozenPrimaryAgent;
+        }
         const row = await this.deps.agentsService.get({ tenantId, agentId });
         return row ?? null;
       },
@@ -421,7 +620,22 @@ export class SessionRegistry {
       mountMemoryStores: async () => {},
       mountSessionOutputs: async () => {},
       buildModel: (agent) => this.deps.buildModel(agent, tenantId),
-      buildTools: (agent, sb) => this.deps.buildTools(agent, sb, tenantId),
+      buildTools: (agent, sb) =>
+        this.deps.buildTools(
+          agent,
+          sb,
+          tenantId,
+          sessionId,
+          (agentId, message, version) =>
+            this.runSubAgent({
+              sessionId,
+              tenantId,
+              agentId,
+              version,
+              message,
+              parentThreadId: "sthr_primary",
+            }),
+        ),
       buildHarness: () => this.deps.buildHarness(),
       buildHarnessContext: (input) =>
         this.deps.buildHarnessContext({
