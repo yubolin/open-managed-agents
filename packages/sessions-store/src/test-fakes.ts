@@ -21,6 +21,7 @@ import type {
 } from "./ports";
 import { SessionService } from "./service";
 import type { SessionResourceRow, SessionRow } from "./types";
+import type { SnapshotState } from "./types";
 
 interface InMemSession {
   id: string;
@@ -31,6 +32,9 @@ interface InMemSession {
   status: SessionStatus;
   vault_ids: string[] | null;
   agent_snapshot: AgentConfig | null;
+  snapshot_state: SnapshotState;
+  snapshot_hash: string | null;
+  snapshot_finalized_at: number | null;
   environment_snapshot: EnvironmentConfig | null;
   metadata: Record<string, unknown> | null;
   created_at: number;
@@ -64,6 +68,9 @@ export class InMemorySessionRepo implements SessionRepo {
       status: session.status,
       vault_ids: session.vaultIds,
       agent_snapshot: session.agentSnapshot,
+      snapshot_state: session.snapshotState,
+      snapshot_hash: session.snapshotHash,
+      snapshot_finalized_at: session.snapshotFinalizedAt,
       environment_snapshot: session.environmentSnapshot,
       metadata: session.metadata,
       created_at: session.createdAt,
@@ -188,9 +195,52 @@ export class InMemorySessionRepo implements SessionRepo {
     if (update.title !== undefined) row.title = update.title;
     if (update.status !== undefined) row.status = update.status;
     if (update.metadata !== undefined) row.metadata = update.metadata;
-    if (update.agentSnapshot !== undefined) row.agent_snapshot = update.agentSnapshot;
     if (update.environmentSnapshot !== undefined) row.environment_snapshot = update.environmentSnapshot;
     row.updated_at = update.updatedAt;
+    return toSessionRow(row);
+  }
+
+  async compareAndSwapSnapshot(input: {
+    tenantId: string;
+    sessionId: string;
+    expectedHash: string;
+    agentSnapshot: AgentConfig;
+    newHash: string;
+    updatedAt: number;
+  }): Promise<SessionRow | null> {
+    const row = this.sessions.get(input.sessionId);
+    if (
+      !row ||
+      row.tenant_id !== input.tenantId ||
+      row.snapshot_state !== "building" ||
+      row.snapshot_hash !== input.expectedHash
+    ) {
+      return null;
+    }
+    row.agent_snapshot = input.agentSnapshot;
+    row.snapshot_hash = input.newHash;
+    row.updated_at = input.updatedAt;
+    return toSessionRow(row);
+  }
+
+  async finalizeSnapshot(input: {
+    tenantId: string;
+    sessionId: string;
+    expectedHash: string;
+    finalizedAt: number;
+  }): Promise<SessionRow | null> {
+    const row = this.sessions.get(input.sessionId);
+    if (
+      !row ||
+      row.tenant_id !== input.tenantId ||
+      row.snapshot_state !== "building" ||
+      row.snapshot_hash !== input.expectedHash
+    ) {
+      return null;
+    }
+    row.snapshot_state = "finalized";
+    row.snapshot_finalized_at = input.finalizedAt;
+    row.updated_at = input.finalizedAt;
     return toSessionRow(row);
   }
 
@@ -371,6 +421,10 @@ function toSessionRow(s: InMemSession): SessionRow {
     status: s.status,
     vault_ids: s.vault_ids,
     agent_snapshot: s.agent_snapshot,
+    snapshot_state: s.snapshot_state,
+    snapshot_hash: s.snapshot_hash,
+    snapshot_finalized_at:
+      s.snapshot_finalized_at !== null ? msToIso(s.snapshot_finalized_at) : null,
     environment_snapshot: s.environment_snapshot,
     metadata: s.metadata,
     created_at: msToIso(s.created_at),

@@ -1,6 +1,6 @@
 # AIOps 数字员工平台 · 复用矩阵与实施路线
 
-> 状态：架构评审稿 v4.1（2026-08-17）：飞书 ④→②（PR #157 上游事实）
+> 状态：架构评审稿 v4.2（2026-08-17）：飞书 ④→②（PR #157 上游事实）；版本快照口径对齐 SDS v0.2
 > 代码快照：`8027dde`，工作区含未提交变更。代码证据区分 HEAD 与工作区版本。
 > 上游事实：PR #157（飞书集成，14 commits）已于 2026-08-16 合入 `openma-ai:main`，含数据库/Provider/Node WS Runner/Console/迁移/文档，真实发送/读取工具、凭据加密、去重、断线退避、自动回复链路；PR 记录全仓测试 1727 passed，并完成真实自建应用 `publish → @mention → threaded reply` E2E。飞书证据以社区主线为准。
 >
@@ -77,22 +77,22 @@ Workspace BFF · 服务模板 · Run 数据模型 · RBAC 权限矩阵与检查�
 **底座 A · 租户所有权基线**（原则，非机械加字段）：
 
 1. 每个聚合根必须具有明确 tenant ownership；
-2. 子表通过不可绕过的 FK/复合键继承租户边界；
+2. 子资源必须不可绕过地继承租户边界；实现机制可按领域选择复合键、FK、tenant-scoped repository 或事务约束等价物，不机械要求 FK；
 3. 所有查询与后台任务必须从可信上下文获得 tenant；
 4. 高风险表可冗余 tenant_id 以强化查询与约束；
 5. 用真实跨租户负向测试证明隔离，而不是只检查字段存在。
 
-**底座 B · 版本快照（当前最大实际代码缺口）**
+**底座 B · Agent 版本解析与 Session 快照冻结（三个实际缺口）**
 
-现况：Session API 接受 `{id, version}` 但只读取 id，随后获取当前 Agent 版本（packages/http-routes/src/sessions/index.ts:296）；子 Agent 工具执行只传 Agent ID，不传配置中的 version（apps/agent/src/harness/tools.ts:1193）。
+现况：平台**已有** Session 创建时固化完整 `agentSnapshot` 的机制（`packages/http-routes/src/sessions/index.ts:296,341,363,443`；Runtime 优先读取快照：`apps/agent/src/runtime/session-do.ts:399`），因此缺口不是“Session 尚无 resolved snapshot”，也不需要新增快照列。真实缺口为：
 
-必须新增：
+1. **G1 · 显式版本未生效**：Session API 接受 `{id, version}`，但当前只使用 id，并按当前 Agent 生成快照；
+2. **G2 · 委派不传播版本**：子 Agent 委派只传 Agent ID，未从调用 Agent 的已解析 `callable_agents` roster 传播并固定目标版本；
+3. **G3 · 构建/冻结边界未显式建模**：`sessions-store` 更新接口允许改写 `agent_snapshot`；同时集成发布链路存在“创建 Session 后、Runtime init 前”按会话补充 MCP 配置的合法构建期更新，不能简单按“DB 创建后全部拒绝”封堵。SDS 必须先定义 snapshot 的构建完成/冻结时点，再保证冻结后不可变。
 
-1. Session 创建按指定 Agent version 解析；
-2. 子 Agent 委派传播并固定 version；
-3. 工具、Skill、知识源、策略分别保存不可变版本；
-4. Run 保存最终 resolved snapshot，而不只是模板 ID；
-5. 并发测试：配置更新不影响运行中 Run。
+底座 B 的交付范围：指定版本解析（当前版本在 `agents`、历史版本在 `agent_versions`，全程 tenant scope）；递归委派树的版本传播；构建期与冻结期状态边界；Node/CF 分环境、跨租户、并发与冻结后拒写测试。详细设计与 go-ahead 门见 `p0-version-snapshot-sds.md`。
+
+**Run resolved snapshot 属于另一聚合**：服务模板版本、申请参数、工作流、知识源、审批策略、计划与证据由 Run 模型 spec 定义，不塞入 Session `agent_snapshot`，也不作为底座 B 已实现能力。
 
 **可选准入工作流**：SSO（企业客户首期要求统一登录时启动，见 §2.3）。
 

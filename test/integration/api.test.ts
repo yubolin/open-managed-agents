@@ -368,6 +368,81 @@ describe("Session CRUD", () => {
     // agent_snapshot should not leak in response
     expect(body.agent_snapshot).toBeUndefined();
   });
+
+  it("honors an explicitly requested historical agent version", async () => {
+    const agentRes = await api("/v1/agents", {
+      method: "POST",
+      headers: HEADERS,
+      body: JSON.stringify({
+        name: "Version-pinned agent",
+        model: "claude-sonnet-4-6",
+        system: "historical-v1",
+        harness: "test",
+      }),
+    });
+    const agent = (await agentRes.json()) as any;
+    await api(`/v1/agents/${agent.id}`, {
+      method: "PUT",
+      headers: HEADERS,
+      body: JSON.stringify({ system: "current-v2" }),
+    });
+    const envRes = await api("/v1/environments", {
+      method: "POST",
+      headers: HEADERS,
+      body: JSON.stringify({ name: "version-pin-env", config: { type: "cloud" } }),
+    });
+    const environment = (await envRes.json()) as any;
+
+    const sessionRes = await api("/v1/sessions", {
+      method: "POST",
+      headers: HEADERS,
+      body: JSON.stringify({
+        agent: { id: agent.id, version: 1 },
+        environment_id: environment.id,
+      }),
+    });
+    expect(sessionRes.status).toBe(201);
+    const session = (await sessionRes.json()) as any;
+
+    expect(session.agent.version).toBe(1);
+    expect(session.agent.system).toBe("historical-v1");
+  });
+
+  it("rejects a requested agent version that does not exist", async () => {
+    const agentRes = await api("/v1/agents", {
+      method: "POST",
+      headers: HEADERS,
+      body: JSON.stringify({
+        name: "Missing-version agent",
+        model: "claude-sonnet-4-6",
+        harness: "test",
+      }),
+    });
+    const agent = (await agentRes.json()) as any;
+    const envRes = await api("/v1/environments", {
+      method: "POST",
+      headers: HEADERS,
+      body: JSON.stringify({ name: "missing-version-env", config: { type: "cloud" } }),
+    });
+    const environment = (await envRes.json()) as any;
+
+    const sessionRes = await api("/v1/sessions", {
+      method: "POST",
+      headers: HEADERS,
+      body: JSON.stringify({
+        agent: { id: agent.id, version: 999 },
+        environment_id: environment.id,
+      }),
+    });
+
+    expect(sessionRes.status).toBe(404);
+    await expect(sessionRes.json()).resolves.toMatchObject({
+      error: {
+        type: "not_found_error",
+        message: expect.stringMatching(/version/i),
+      },
+    });
+  });
 });
 
 // ============================================================

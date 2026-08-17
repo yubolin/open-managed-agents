@@ -96,8 +96,8 @@ cd apps/main-node && AUTH_DISABLED=1 npx tsx src/index.ts   # :8787
 ### 4.2 前置资源（一次性）
 
 ```bash
-# 1) Model Card（创建时平台会探活，ok:true 才可用）
-curl -s $BASE/v1/model-cards -H "x-api-key: $KEY" -H 'content-type: application/json' -d '{
+# 1) Model Card（创建时平台会探活；注意路由是下划线 /v1/model_cards）
+curl -s $BASE/v1/model_cards -H "x-api-key: $KEY" -H 'content-type: application/json' -d '{
   "model_id": "minimax-m2.7", "provider": "ant-compatible",
   "api_key": "<MINIMAX_KEY>", "base_url": "https://api.minimaxi.com/anthropic" }'
 

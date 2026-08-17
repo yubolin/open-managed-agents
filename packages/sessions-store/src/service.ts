@@ -1,6 +1,7 @@
 import {
   generateResourceId,
   generateSessionId,
+  hashJsonSnapshot,
 } from "@open-managed-agents/shared";
 import { paginateVia } from "@open-managed-agents/shared";
 import type {
@@ -15,6 +16,9 @@ import {
   SessionNotFoundError,
   SessionResourceMaxExceededError,
   SessionResourceNotFoundError,
+  SnapshotAlreadyFinalizedError,
+  SnapshotHashMismatchError,
+  SnapshotLegacyUnversionedError,
 } from "./errors";
 import type {
   Clock,
@@ -115,6 +119,9 @@ export class SessionService {
 
     const sessionId = this.ids.sessionId();
     const createdAt = this.clock.nowMs();
+    const preparedSnapshot = opts.agentSnapshot
+      ? await hashJsonSnapshot(opts.agentSnapshot)
+      : null;
 
     const resourceInputs: NewSessionResourceInput[] = resources.map((r) => {
       const resourceId = this.ids.resourceId();
@@ -142,7 +149,10 @@ export class SessionService {
         title: opts.title ?? "",
         status: opts.status ?? "idle",
         vaultIds: opts.vaultIds ?? null,
-        agentSnapshot: opts.agentSnapshot ?? null,
+        agentSnapshot: preparedSnapshot?.normalized ?? null,
+        snapshotState: preparedSnapshot ? "building" : "legacy_unversioned",
+        snapshotHash: preparedSnapshot?.configHash ?? null,
+        snapshotFinalizedAt: null,
         environmentSnapshot: opts.environmentSnapshot ?? null,
         metadata: opts.metadata ?? null,
         createdAt,
@@ -151,9 +161,70 @@ export class SessionService {
     );
   }
 
+  async updateSnapshot(opts: {
+    tenantId: string;
+    sessionId: string;
+    expectedHash: string;
+    agentSnapshot: AgentConfig;
+  }): Promise<SessionRow> {
+    const prepared = await hashJsonSnapshot(opts.agentSnapshot);
+    const updated = await this.repo.compareAndSwapSnapshot({
+      tenantId: opts.tenantId,
+      sessionId: opts.sessionId,
+      expectedHash: opts.expectedHash,
+      agentSnapshot: prepared.normalized,
+      newHash: prepared.configHash,
+      updatedAt: this.clock.nowMs(),
+    });
+    if (updated) return updated;
+    return this.throwSnapshotCasFailure(opts);
+  }
+
+  async finalizeSnapshot(opts: {
+    tenantId: string;
+    sessionId: string;
+    expectedHash: string;
+  }): Promise<SessionRow> {
+    const finalized = await this.repo.finalizeSnapshot({
+      tenantId: opts.tenantId,
+      sessionId: opts.sessionId,
+      expectedHash: opts.expectedHash,
+      finalizedAt: this.clock.nowMs(),
+    });
+    if (finalized) return finalized;
+
+    const current = await this.repo.get(opts.tenantId, opts.sessionId);
+    if (!current) throw new SessionNotFoundError();
+    if (
+      current.snapshot_state === "finalized" &&
+      current.snapshot_hash === opts.expectedHash
+    ) {
+      return current;
+    }
+    if (current.snapshot_state === "legacy_unversioned") {
+      throw new SnapshotLegacyUnversionedError();
+    }
+    throw new SnapshotHashMismatchError();
+  }
+
+  private async throwSnapshotCasFailure(opts: {
+    tenantId: string;
+    sessionId: string;
+  }): Promise<never> {
+    const current = await this.repo.get(opts.tenantId, opts.sessionId);
+    if (!current) throw new SessionNotFoundError();
+    if (current.snapshot_state === "finalized") {
+      throw new SnapshotAlreadyFinalizedError();
+    }
+    if (current.snapshot_state === "legacy_unversioned") {
+      throw new SnapshotLegacyUnversionedError();
+    }
+    throw new SnapshotHashMismatchError();
+  }
+
   /**
-   * Patch a session: title, metadata (merge with per-key delete on null),
-   * status, snapshots. Bumps updated_at. Mirrors POST /v1/sessions/:id behavior
+   * Patch mutable session fields. Agent snapshot changes must use the CAS
+   * lifecycle methods; this path cannot bypass finalization.
    * (sessions.ts:477-504).
    */
   async update(opts: {
@@ -163,14 +234,12 @@ export class SessionService {
     /** Per-key merge — pass `{ key: null }` to drop a key. Pass undefined to skip. */
     metadata?: Record<string, unknown>;
     status?: SessionStatus;
-    agentSnapshot?: AgentConfig;
     environmentSnapshot?: EnvironmentConfig;
   }): Promise<SessionRow> {
     const existing = await this.requireSession(opts);
     const update: SessionUpdateFields = { updatedAt: this.clock.nowMs() };
     if (opts.title !== undefined) update.title = opts.title;
     if (opts.status !== undefined) update.status = opts.status;
-    if (opts.agentSnapshot !== undefined) update.agentSnapshot = opts.agentSnapshot;
     if (opts.environmentSnapshot !== undefined) update.environmentSnapshot = opts.environmentSnapshot;
     if (opts.metadata !== undefined) {
       update.metadata = mergeMetadata(existing.metadata, opts.metadata);

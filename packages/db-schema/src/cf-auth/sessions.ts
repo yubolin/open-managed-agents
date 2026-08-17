@@ -39,6 +39,11 @@ export const sessions = sqliteTable(
     // JSON blobs — plain TEXT, parsed in the adapter layer.
     vault_ids: text("vault_ids"),
     agent_snapshot: text("agent_snapshot"),
+    // Snapshot lifecycle is intentionally independent from Session status.
+    // Nullable during the staged legacy backfill; new writes always set it.
+    snapshot_state: text("snapshot_state"),
+    snapshot_hash: text("snapshot_hash"),
+    snapshot_finalized_at: integer("snapshot_finalized_at"),
     environment_snapshot: text("environment_snapshot"),
     metadata: text("metadata"),
     created_at: integer("created_at").notNull(),

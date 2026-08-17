@@ -24,6 +24,8 @@ import type {
   SessionStatus,
 } from "@open-managed-agents/shared";
 
+export type SnapshotState = "building" | "finalized" | "legacy_unversioned";
+
 export interface SessionRow {
   id: string;
   tenant_id: string;
@@ -35,6 +37,9 @@ export interface SessionRow {
   vault_ids: string[] | null;
   /** Frozen agent definition at session-create time. Null only for tests / legacy paths. */
   agent_snapshot: AgentConfig | null;
+  snapshot_state: SnapshotState;
+  snapshot_hash: string | null;
+  snapshot_finalized_at: string | null;
   /** Frozen environment definition at session-create time. */
   environment_snapshot: EnvironmentConfig | null;
   /** Caller-supplied free-form metadata (Linear webhook context, eval-run id, etc.). */

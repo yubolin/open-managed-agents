@@ -316,9 +316,17 @@ export function buildSessionRoutes(deps: SessionRoutesDeps) {
     }>();
 
     const agentId = typeof body.agent === "string" ? body.agent : body.agent?.id;
+    const requestedVersion =
+      typeof body.agent === "object" ? body.agent.version : undefined;
     const wrappedEnv =
       typeof body.environment === "string" ? body.environment : body.environment?.id;
     if (!agentId) return c.json({ error: "agent is required" }, 400);
+    if (
+      requestedVersion !== undefined &&
+      (!Number.isInteger(requestedVersion) || requestedVersion < 1)
+    ) {
+      return c.json({ error: "agent version must be a positive integer" }, 400);
+    }
 
     const memCount = (body.resources ?? []).filter((r) => r.type === "memory_store").length;
     if (memCount > 8) {
@@ -341,7 +349,25 @@ export function buildSessionRoutes(deps: SessionRoutesDeps) {
     const agentRow = await services.agents.get({ tenantId: t, agentId });
     if (!agentRow) return c.json({ error: "Agent not found" }, 404);
 
-    const agentIsLocalRuntime = !!agentRow.runtime_binding;
+    let resolvedAgentSnapshot: AgentConfig;
+    if (requestedVersion === undefined || requestedVersion === agentRow.version) {
+      const { tenant_id: _tenantId, ...currentSnapshot } = agentRow;
+      resolvedAgentSnapshot = currentSnapshot;
+    } else if (requestedVersion < agentRow.version) {
+      const historical = await services.agents.getVersion({
+        tenantId: t,
+        agentId,
+        version: requestedVersion,
+      });
+      if (!historical) {
+        return c.json({ error: `Agent version ${requestedVersion} not found` }, 404);
+      }
+      resolvedAgentSnapshot = historical.snapshot;
+    } else {
+      return c.json({ error: `Agent version ${requestedVersion} not found` }, 404);
+    }
+
+    const agentIsLocalRuntime = !!resolvedAgentSnapshot.runtime_binding;
 
     if (deps.lifecycle?.preCreateGate) {
       const gate = await deps.lifecycle.preCreateGate({
@@ -360,7 +386,7 @@ export function buildSessionRoutes(deps: SessionRoutesDeps) {
       envId = deps.localRuntimeEnvId ?? "env_local_runtime";
     }
 
-    const { tenant_id: _atid, ...agentSnapshot } = agentRow;
+    const agentSnapshot = resolvedAgentSnapshot;
     const envSnap = deps.loadEnvironment
       ? await deps.loadEnvironment({ tenantId: t, environmentId: envId })
       : null;
@@ -456,6 +482,22 @@ export function buildSessionRoutes(deps: SessionRoutesDeps) {
       return mapSessionError(c, err);
     }
     const sessionId = session.id;
+
+    // Runtime initialization may only consume an immutable snapshot baseline.
+    // Public session creation has no build-time augmentation, so finalize
+    // immediately after the atomic create.
+    if (!session.snapshot_hash) {
+      return c.json({ error: "session snapshot hash missing" }, 500);
+    }
+    try {
+      session = await services.sessions.finalizeSnapshot({
+        tenantId: t,
+        sessionId,
+        expectedHash: session.snapshot_hash,
+      });
+    } catch (err) {
+      return mapSessionError(c, err);
+    }
 
     // Init the runtime layer (DO PUT /init or Node warm + init events).
     const initParams: SessionInitParams = {

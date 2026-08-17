@@ -15,7 +15,7 @@ import type {
   SessionResource,
   SessionStatus,
 } from "@open-managed-agents/shared";
-import type { SessionResourceRow, SessionRow } from "./types";
+import type { SessionResourceRow, SessionRow, SnapshotState } from "./types";
 
 export interface NewSessionInput {
   id: string;
@@ -26,6 +26,9 @@ export interface NewSessionInput {
   status: SessionStatus;
   vaultIds: string[] | null;
   agentSnapshot: AgentConfig | null;
+  snapshotState: SnapshotState;
+  snapshotHash: string | null;
+  snapshotFinalizedAt: number | null;
   environmentSnapshot: EnvironmentConfig | null;
   metadata: Record<string, unknown> | null;
   createdAt: number;
@@ -49,7 +52,6 @@ export interface SessionUpdateFields {
    * merge semantics (per sessions.ts:489-498).
    */
   metadata?: Record<string, unknown> | null;
-  agentSnapshot?: AgentConfig | null;
   environmentSnapshot?: EnvironmentConfig | null;
   updatedAt: number;
 }
@@ -126,6 +128,24 @@ export interface SessionRepo {
     sessionId: string,
     update: SessionUpdateFields,
   ): Promise<SessionRow>;
+
+  /** Single-statement CAS: the adapter must include state + expected hash in WHERE. */
+  compareAndSwapSnapshot(input: {
+    tenantId: string;
+    sessionId: string;
+    expectedHash: string;
+    agentSnapshot: AgentConfig;
+    newHash: string;
+    updatedAt: number;
+  }): Promise<SessionRow | null>;
+
+  /** Single-statement building -> finalized transition guarded by expected hash. */
+  finalizeSnapshot(input: {
+    tenantId: string;
+    sessionId: string;
+    expectedHash: string;
+    finalizedAt: number;
+  }): Promise<SessionRow | null>;
 
   archive(tenantId: string, sessionId: string, archivedAt: number): Promise<SessionRow>;
 

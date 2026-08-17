@@ -37,3 +37,24 @@ export class SessionArchivedError extends Error {
     super(message);
   }
 }
+
+export class SnapshotHashMismatchError extends Error {
+  readonly code = "snapshot_hash_mismatch";
+  constructor(message = "Session snapshot hash does not match the expected hash") {
+    super(message);
+  }
+}
+
+export class SnapshotAlreadyFinalizedError extends Error {
+  readonly code = "snapshot_already_finalized";
+  constructor(message = "Session snapshot is already finalized") {
+    super(message);
+  }
+}
+
+export class SnapshotLegacyUnversionedError extends Error {
+  readonly code = "snapshot_legacy_unversioned";
+  constructor(message = "Legacy unversioned sessions cannot enter snapshot CAS lifecycle") {
+    super(message);
+  }
+}

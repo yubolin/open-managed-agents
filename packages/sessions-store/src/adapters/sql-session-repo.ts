@@ -60,6 +60,9 @@ export class SqlSessionRepo implements SessionRepo {
       vault_ids: session.vaultIds !== null ? JSON.stringify(session.vaultIds) : null,
       agent_snapshot:
         session.agentSnapshot !== null ? JSON.stringify(session.agentSnapshot) : null,
+      snapshot_state: session.snapshotState,
+      snapshot_hash: session.snapshotHash,
+      snapshot_finalized_at: session.snapshotFinalizedAt,
       environment_snapshot:
         session.environmentSnapshot !== null
           ? JSON.stringify(session.environmentSnapshot)
@@ -220,10 +223,6 @@ export class SqlSessionRepo implements SessionRepo {
     if (update.metadata !== undefined) {
       set.metadata = update.metadata !== null ? JSON.stringify(update.metadata) : null;
     }
-    if (update.agentSnapshot !== undefined) {
-      set.agent_snapshot =
-        update.agentSnapshot !== null ? JSON.stringify(update.agentSnapshot) : null;
-    }
     if (update.environmentSnapshot !== undefined) {
       set.environment_snapshot =
         update.environmentSnapshot !== null
@@ -239,6 +238,62 @@ export class SqlSessionRepo implements SessionRepo {
     const row = await this.get(tenantId, sessionId);
     if (!row) throw new SessionNotFoundError();
     return row;
+  }
+
+  async compareAndSwapSnapshot(input: {
+    tenantId: string;
+    sessionId: string;
+    expectedHash: string;
+    agentSnapshot: AgentConfig;
+    newHash: string;
+    updatedAt: number;
+  }): Promise<SessionRow | null> {
+    const rows = await getAll<typeof sessions.$inferSelect>(
+      this.db
+        .update(sessions)
+        .set({
+          agent_snapshot: JSON.stringify(input.agentSnapshot),
+          snapshot_hash: input.newHash,
+          updated_at: input.updatedAt,
+        })
+        .where(
+          and(
+            eq(sessions.id, input.sessionId),
+            eq(sessions.tenant_id, input.tenantId),
+            eq(sessions.snapshot_state, "building"),
+            eq(sessions.snapshot_hash, input.expectedHash),
+          ),
+        )
+        .returning(),
+    );
+    return rows.length === 1 ? toSessionRow(rows[0]!) : null;
+  }
+
+  async finalizeSnapshot(input: {
+    tenantId: string;
+    sessionId: string;
+    expectedHash: string;
+    finalizedAt: number;
+  }): Promise<SessionRow | null> {
+    const rows = await getAll<typeof sessions.$inferSelect>(
+      this.db
+        .update(sessions)
+        .set({
+          snapshot_state: "finalized",
+          snapshot_finalized_at: input.finalizedAt,
+          updated_at: input.finalizedAt,
+        })
+        .where(
+          and(
+            eq(sessions.id, input.sessionId),
+            eq(sessions.tenant_id, input.tenantId),
+            eq(sessions.snapshot_state, "building"),
+            eq(sessions.snapshot_hash, input.expectedHash),
+          ),
+        )
+        .returning(),
+    );
+    return rows.length === 1 ? toSessionRow(rows[0]!) : null;
   }
 
   async archive(
@@ -420,6 +475,10 @@ function toSessionRow(r: typeof sessions.$inferSelect): SessionRow {
     vault_ids: r.vault_ids !== null ? (JSON.parse(r.vault_ids) as string[]) : null,
     agent_snapshot:
       r.agent_snapshot !== null ? (JSON.parse(r.agent_snapshot) as AgentConfig) : null,
+    snapshot_state: (r.snapshot_state ?? "legacy_unversioned") as SessionRow["snapshot_state"],
+    snapshot_hash: r.snapshot_hash,
+    snapshot_finalized_at:
+      r.snapshot_finalized_at !== null ? msToIso(r.snapshot_finalized_at) : null,
     environment_snapshot:
       r.environment_snapshot !== null
         ? (JSON.parse(r.environment_snapshot) as EnvironmentConfig)

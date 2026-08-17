@@ -568,7 +568,7 @@ describe("eventsToMessages", () => {
 // ============================================================
 describe("Thread model — delegateToAgent", () => {
   it("call_agent tool uses delegateToAgent when provided", async () => {
-    const delegateCalls: Array<{ agentId: string; message: string }> = [];
+    const delegateCalls: Array<{ agentId: string; message: string; version?: number }> = [];
 
     const agentConfig: AgentConfig = {
       id: "agent_coord_thread",
@@ -582,8 +582,8 @@ describe("Thread model — delegateToAgent", () => {
     };
 
     const sandbox = new TestSandbox();
-    const mockDelegate = async (agentId: string, message: string) => {
-      delegateCalls.push({ agentId, message });
+    const mockDelegate = async (agentId: string, message: string, version?: number) => {
+      delegateCalls.push({ agentId, message, version });
       return "sub-agent response from thread";
     };
 
@@ -604,6 +604,7 @@ describe("Thread model — delegateToAgent", () => {
     expect(delegateCalls).toHaveLength(1);
     expect(delegateCalls[0].agentId).toBe("agent_worker1");
     expect(delegateCalls[0].message).toBe("analyze this code");
+    expect(delegateCalls[0].version).toBe(1);
   });
 
   it("call_agent tool returns fallback when delegateToAgent is not provided", async () => {

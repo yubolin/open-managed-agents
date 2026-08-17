@@ -35,6 +35,12 @@ export const session_threads = pgTable(
       .references(() => sessions.id, { onDelete: "cascade" }),
     agent_id: text("agent_id").notNull(),
     agent_name: text("agent_name"),
+    agent_version: bigint("agent_version", { mode: "number" }),
+    // Full frozen child config is internal replay evidence and must not be
+    // projected by the public thread-list API.
+    agent_snapshot: text("agent_snapshot"),
+    config_hash: text("config_hash"),
+    hash_algorithm: text("hash_algorithm"),
     // Nullable: sthr_primary has no parent; MATCH SIMPLE skips the composite
     // FK while parent_thread_id is NULL.
     parent_thread_id: text("parent_thread_id"),

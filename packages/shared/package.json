@@ -9,6 +9,7 @@
   "dependencies": {
     "@open-managed-agents/api-types": "workspace:*",
     "@open-managed-agents/eval-core": "workspace:*",
+    "canonicalize": "4.0.0",
     "nanoid": "^5.1.0"
   }
 }

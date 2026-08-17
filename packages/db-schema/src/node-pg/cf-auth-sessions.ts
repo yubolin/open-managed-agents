@@ -17,6 +17,11 @@ export const sessions = pgTable(
     title: text("title"),
     vault_ids: text("vault_ids"),
     agent_snapshot: text("agent_snapshot"),
+    // Separate from the idle/running Session lifecycle. Nullable only while
+    // the staged migration classifies legacy rows.
+    snapshot_state: text("snapshot_state"),
+    snapshot_hash: text("snapshot_hash"),
+    snapshot_finalized_at: bigint("snapshot_finalized_at", { mode: "number" }),
     environment_snapshot: text("environment_snapshot"),
     metadata: text("metadata"),
     turn_id: text("turn_id"),

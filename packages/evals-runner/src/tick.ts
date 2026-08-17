@@ -173,6 +173,15 @@ async function createTaskSession(
     );
   }
 
+  if (!session.snapshot_hash) {
+    throw new Error(`session ${sessionId} snapshot hash missing`);
+  }
+  await services.sessions.finalizeSnapshot({
+    tenantId: t,
+    sessionId,
+    expectedHash: session.snapshot_hash,
+  });
+
   await fwd(binding, `/sessions/${sessionId}/init`, "PUT", JSON.stringify({
     agent_id: run.agent_id,
     environment_id: run.environment_id,

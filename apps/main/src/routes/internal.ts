@@ -285,6 +285,10 @@ app.post("/sessions", async (c) => {
     metadata: Object.keys(initialMetadata).length === 0 ? undefined : initialMetadata,
   });
   const sessionId = createdSession.id;
+  let snapshotHash = createdSession.snapshot_hash;
+  if (!snapshotHash) {
+    return c.json({ error: "session snapshot hash missing" }, 500);
+  }
 
   // Pre-fetch vault credentials so SessionDO can serve them from state
   // instead of reading CONFIG_KV (which may be a different namespace if
@@ -361,13 +365,28 @@ app.post("/sessions", async (c) => {
   // Re-persist the augmented snapshot + metadata when the linear branch
   // mutated either. Skipped for the common (non-Linear) case.
   if (metadataDirty) {
+    const updatedSnapshot = await c.var.services.sessions.updateSnapshot({
+      tenantId,
+      sessionId,
+      expectedHash: snapshotHash,
+      agentSnapshot,
+    });
+    snapshotHash = updatedSnapshot.snapshot_hash;
+    if (!snapshotHash) {
+      return c.json({ error: "updated session snapshot hash missing" }, 500);
+    }
     await c.var.services.sessions.update({
       tenantId,
       sessionId,
-      agentSnapshot,
       metadata: sessionMetadata,
     });
   }
+
+  await c.var.services.sessions.finalizeSnapshot({
+    tenantId,
+    sessionId,
+    expectedHash: snapshotHash,
+  });
 
   // Initialize SessionDO via the sandbox worker. Pass vault_ids so the
   // outbound Worker can match credentials for this session, plus the
