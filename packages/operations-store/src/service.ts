@@ -2,6 +2,9 @@
 // Enforces: 13-state CAS transitions, Single-Transaction Approvals, SoD, CAS Double-Hash Gate, D0 3-phase Audit.
 
 import type { OperationsStorePort } from "./ports";
+import type { OperationsStreamHubPort } from "./stream";
+import { globalOperationsStreamHub } from "./stream";
+import type { WorkspaceStreamEventType } from "@open-managed-agents/api-types";
 import type {
   ApprovalPolicy,
   AuditActor,
@@ -42,7 +45,31 @@ function randomId(prefix: string): string {
 }
 
 export class OperationsService {
-  constructor(private readonly store: OperationsStorePort) {}
+  constructor(
+    private readonly store: OperationsStorePort,
+    private readonly hub: OperationsStreamHubPort = globalOperationsStreamHub
+  ) {}
+
+  private notifyStreamHub(
+    tenantId: string,
+    runId: string,
+    eventType: WorkspaceStreamEventType,
+    payload: Record<string, unknown>
+  ): void {
+    if (!this.hub) return;
+    try {
+      this.hub.publish(tenantId, runId, {
+        id: randomId("wev"),
+        run_id: runId,
+        tenant_id: tenantId,
+        event_type: eventType,
+        payload,
+        ts: Date.now(),
+      });
+    } catch {
+      // Best-effort: broadcast errors never fail the main transaction
+    }
+  }
 
   // --------------------------------------------------------------------------
   // Service Template Management
@@ -186,6 +213,11 @@ export class OperationsService {
       }
     });
 
+    this.notifyStreamHub(tenantId, runId, "run.state_changed", {
+      state: autoSubmit ? "submitted" : "draft",
+      run_id: runId,
+    });
+
     return runRow;
   }
 
@@ -222,6 +254,11 @@ export class OperationsService {
         payload: { submitted_at: now },
         traceId,
       });
+    });
+
+    this.notifyStreamHub(tenantId, runId, "run.state_changed", {
+      state: "submitted",
+      run_id: runId,
     });
 
     return this.getRun(tenantId, runId);
@@ -271,6 +308,12 @@ export class OperationsService {
       });
     });
 
+    this.notifyStreamHub(tenantId, runId, "run.state_changed", {
+      state: "planning",
+      run_id: runId,
+      session_id: sessionId,
+    });
+
     return this.getRun(tenantId, runId);
   }
 
@@ -292,48 +335,49 @@ export class OperationsService {
     }
 
     const now = Date.now();
+    const planArtifactId = randomId("art_plan");
+
     await this.store.transaction(async (tx) => {
-      // 1. Append-Only Artifacts
-      const planArtRow: RunArtifactRow = {
-        id: randomId("art"),
-        run_id: runId,
+      // 1. Insert Plan Artifact
+      await tx.insertArtifact({
+        id: planArtifactId,
         tenant_id: tenantId,
+        run_id: runId,
         type: "plan",
         version: 1,
         content: planArtifact.content,
         content_sha256: planArtifact.sha256,
-        metadata: null,
+        metadata: JSON.stringify({ generator: actor.id }),
         created_by: actor.id,
         created_at: now,
-      };
-      await tx.insertArtifact(planArtRow);
+      });
 
-      const evArtRow: RunArtifactRow = {
-        id: evidenceArtifact.id || randomId("art"),
-        run_id: runId,
+      // 2. Insert Evidence Artifact
+      await tx.insertArtifact({
+        id: evidenceArtifact.id,
         tenant_id: tenantId,
+        run_id: runId,
         type: "diagnosis_evidence",
         version: 1,
         content: evidenceArtifact.content,
         content_sha256: evidenceArtifact.sha256,
-        metadata: null,
+        metadata: JSON.stringify({ generator: actor.id }),
         created_by: actor.id,
         created_at: now,
-      };
-      await tx.insertArtifact(evArtRow);
+      });
 
-      // 2. CAS State Transition
+      // 3. Update Run with Hashes and Transition to awaiting_approval
       const ok = await tx.updateRunCAS(tenantId, runId, "planning", {
         state: "awaiting_approval",
         plan_hash: planArtifact.sha256,
-        evidence_snapshot_id: evArtRow.id,
+        evidence_snapshot_id: evidenceArtifact.id,
         evidence_snapshot_hash: evidenceArtifact.sha256,
         planned_at: now,
         updated_at: now,
       });
       if (!ok) throw new RunStateConflictError(runId, "planning");
 
-      // 3. Audits
+      // 4. Audit Trail
       await this.recordAuditEventInternal(tx, {
         tenantId,
         resourceType: "run",
@@ -372,6 +416,19 @@ export class OperationsService {
       });
     });
 
+    this.notifyStreamHub(tenantId, runId, "run.artifact_created", {
+      type: "plan",
+      sha256: planArtifact.sha256,
+    });
+    this.notifyStreamHub(tenantId, runId, "run.approval_requested", {
+      stage: run.current_approval_stage,
+      plan_hash: planArtifact.sha256,
+    });
+    this.notifyStreamHub(tenantId, runId, "run.state_changed", {
+      state: "awaiting_approval",
+      run_id: runId,
+    });
+
     return this.getRun(tenantId, runId);
   }
 
@@ -383,7 +440,7 @@ export class OperationsService {
     const { tenantId, runId, actor, decision, comment, traceId = randomId("trc") } = params;
     const now = Date.now();
 
-    return this.store.transaction(async (tx) => {
+    const res = await this.store.transaction(async (tx) => {
       const run = await tx.getRun(tenantId, runId);
       if (!run) throw new RunNotFoundError(runId);
 
@@ -555,6 +612,18 @@ export class OperationsService {
       const updated = await tx.getRun(tenantId, runId);
       return updated!;
     });
+
+    this.notifyStreamHub(tenantId, runId, "run.approval_decided", {
+      decision,
+      approver_id: actor.id,
+      state: res.state,
+    });
+    this.notifyStreamHub(tenantId, runId, "run.state_changed", {
+      state: res.state,
+      run_id: runId,
+    });
+
+    return res;
   }
 
   /**
@@ -564,7 +633,7 @@ export class OperationsService {
     const { tenantId, runId, actor, inputParameters, comment, traceId = randomId("trc") } = params;
     const now = Date.now();
 
-    return this.store.transaction(async (tx) => {
+    const res = await this.store.transaction(async (tx) => {
       const run = await tx.getRun(tenantId, runId);
       if (!run) throw new RunNotFoundError(runId);
 
@@ -605,6 +674,13 @@ export class OperationsService {
       const updated = await tx.getRun(tenantId, runId);
       return updated!;
     });
+
+    this.notifyStreamHub(tenantId, runId, "run.state_changed", {
+      state: "planning",
+      run_id: runId,
+    });
+
+    return res;
   }
 
   // --------------------------------------------------------------------------
@@ -619,7 +695,7 @@ export class OperationsService {
   ): Promise<RunRow> {
     const now = Date.now();
 
-    return this.store.transaction(async (tx) => {
+    const res = await this.store.transaction(async (tx) => {
       const run = await tx.getRun(tenantId, runId);
       if (!run) throw new RunNotFoundError(runId);
 
@@ -674,6 +750,13 @@ export class OperationsService {
       const updated = await tx.getRun(tenantId, runId);
       return updated!;
     });
+
+    this.notifyStreamHub(tenantId, runId, "run.state_changed", {
+      state: "executing",
+      run_id: runId,
+    });
+
+    return res;
   }
 
   private async handleDriftInvalidation(
@@ -722,7 +805,7 @@ export class OperationsService {
     const { tenantId, runId, actor, reason, traceId = randomId("trc") } = params;
     const now = Date.now();
 
-    return this.store.transaction(async (tx) => {
+    const res = await this.store.transaction(async (tx) => {
       const run = await tx.getRun(tenantId, runId);
       if (!run) throw new RunNotFoundError(runId);
 
@@ -758,6 +841,17 @@ export class OperationsService {
       const updated = await tx.getRun(tenantId, runId);
       return updated!;
     });
+
+    this.notifyStreamHub(tenantId, runId, "run.cancelled", {
+      reason,
+      cancelled_by: actor.id,
+    });
+    this.notifyStreamHub(tenantId, runId, "run.state_changed", {
+      state: "cancelled",
+      run_id: runId,
+    });
+
+    return res;
   }
 
   async interruptRun(
@@ -769,7 +863,7 @@ export class OperationsService {
   ): Promise<RunRow> {
     const now = Date.now();
 
-    return this.store.transaction(async (tx) => {
+    const res = await this.store.transaction(async (tx) => {
       const run = await tx.getRun(tenantId, runId);
       if (!run) throw new RunNotFoundError(runId);
 
@@ -804,6 +898,17 @@ export class OperationsService {
       const updated = await tx.getRun(tenantId, runId);
       return updated!;
     });
+
+    this.notifyStreamHub(tenantId, runId, "run.interrupted", {
+      reason,
+      interrupted_by: actor.id,
+    });
+    this.notifyStreamHub(tenantId, runId, "run.state_changed", {
+      state: "interrupted",
+      run_id: runId,
+    });
+
+    return res;
   }
 
   async finishExecution(

@@ -4,6 +4,7 @@ export * from "./types";
 export * from "./errors";
 export * from "./ports";
 export * from "./service";
+export * from "./stream";
 export * from "./test-fakes";
 export * from "./adapters/drizzle";
 

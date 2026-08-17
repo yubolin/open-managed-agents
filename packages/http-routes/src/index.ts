@@ -73,4 +73,9 @@ export type {
   RateLimitHooks,
 } from "./integrations/gateway";
 
-export { operationsRoutes, verifyTicket } from "./operations";
+export {
+  operationsRoutes,
+  generateTicket,
+  verifyTicket,
+  sseTicketStoreStats,
+} from "./operations";

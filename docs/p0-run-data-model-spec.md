@@ -1,7 +1,8 @@
-# Operations Run 数据模型 Spec (v0.4.3)
+# Operations Run 数据模型 Spec (v0.4.4)
 
-> 状态：v0.4.3 · **评审定稿**（2026-08-17）
+> 状态：v0.4.4 · **评审定稿**（2026-08-17）
 > 修订记录：
+> - v0.4.4（2026-08-17）：Base C 验收落档——§8 行 3 拆分为 **R9a / R9b 诚实记账**：R9a（一次性消费 + 30s TTL + 租户/Run 双向绑定 + 重放/跨租户反探测）随 Base C 收口，票据仓新增 TTL 节流清扫与 FIFO 容量上限（10k）防无界增长；R9b（QPS 限流窗口 + UA 指纹绑定的压测定标）**未实现、保持开放**（代码零限流逻辑，评审 F1 裁定不许改题关门）。
 > - v0.4.3（2026-08-17）：架构对抗性评审落地——新增 **§9「Base B 实现不变量」**（状态 CAS / 审批审计单事务 / Session 终态服务端闭环）；§8 新增开放项 5（`run_artifacts` 大对象 offload 定标）；**D1 触发器策略修订**：Cloudflare 官方文档称 D1 默认强制外键，但仓库 sql-client 适配层留有相反运行时实证（`packages/sql-client/src/adapters/better-sqlite3.ts:150-154`，children-first 安装流成功）——事实无法当场复演，按"两种 regime 下都正确"的支配策略，D1 迁移 `0002_operations_workspace` **同步回填同款 14 只 `trg_fk*` 镜像**（FK=ON 时冗余、FK=OFF 时承重），并以独立测试套件固化（D1 文件 standalone FK=OFF 全量准则）。
 > - v0.4.2（2026-08-17）：实现期勘误（Base A）——`run_events` 复合外键删除动作由 `ON DELETE SET NULL` 改为 **`NO ACTION`**：复合外键的 SET NULL 会将整组引用列（含 `NOT NULL tenant_id`）置空，任何 Run 物理删除将直接违约报错；且 P0 无 Run 删除流程，审计子表引用即阻止删除（对齐 feishu-ops 0002 `trg_fkd` 的 RAISE ABORT 先例，三店语义一致）。`run_id` 可空性与 MATCH SIMPLE 校验规则不变。
 > - v0.4.1（2026-08-17）：架构评审裁定 **Run↔Session 基数**——一个 Run 生命周期内**顺序持有多个 Session**（每次进入 `planning` 新建一个，含首次规划与返工/失效重规划），**任一时刻至多一个活跃**：ER 基数改 `RUN ||--o{ SESSION`；`runs.session_id` 释义收窄为"当前活跃 Session"；§5.2 行 12 明确失效重规划**新建 Session**（历史 Session 保留完整审计留痕）。对齐运行时约束"Session 同一时刻仅一个活跃 turn"。
@@ -410,7 +411,8 @@ async function verifyExecutionGate(runId: string, tenantId: string, tx: Transact
 |---|---|---|---|---|
 | 1 | R5 | 证据漂移错误码与计划漂移共用 `409 PLAN_HASH_DRIFT_INVALIDATED`（BFF/RDAC/本文档三处一致） | **已收口（Base B）**：拆分为 `EVIDENCE_HASH_DRIFT_INVALIDATED` 与 `PLAN_HASH_DRIFT_INVALIDATED`，已完成三文档（BFF / RDAC / 本文档）与代码错误码表统一升版 | ✅ Base B |
 | 2 | R8 | 租户默认审批组 `grp_tenant_default_approvers` 的置备方式（Console 界面 vs Seed 脚本）与"默认组亦为空"的终局行为 | **已收口（Base B 裁定）**：`group_id` 为逻辑锚点，租户初始化通过 Seed 脚本置备默认组，Console 提供管理界面；若默认组为空，保持阻塞并升级通知租户 Owner，**绝不自动批准**（与 §6.3 一致） | ✅ Base B |
-| 3 | R9 | SSE Ticket 端点（`POST /v1/workspace/auth/ticket`）的限流与重放防护参数 | 一次性 + 30s TTL 已定稿；QPS/窗口/绑定 UA 指纹待压测定标 | Base C（SSE 通道实现） |
+| 3 | R9 | SSE Ticket 端点（`POST /v1/workspace/auth/ticket`）的重放防护参数 | **已收口（Base C，R9a）**：一次性消费（用后即焚）+ 30s TTL + 租户/Run 双向绑定定稿；跨租户返回 404 反探测、跨 Run 401 阻断、重放 401 阻断，双端 ReadableStream 统一同构；票据仓 TTL 节流清扫 + FIFO 容量上限（10k）防无界增长 | ✅ Base C |
+| 3b | R9 | 同上——QPS 限流窗口与 UA 指纹绑定 | **未收口（诚实记账，评审 F1）**：代码零限流实现（operations 路由全文无 rate-limit 逻辑）；待压测定标 QPS/窗口参数后落限流中间件与指纹绑定 | ⏳ 开放（压测定标后收口） |
 | 4 | — | SQLite/D1 迁移中 FK=OFF 环境下的 Trigger 镜像 —— **已收口（Base A + v0.4.3 修订，2026-08-17）**：node-sqlite `0006_operations_workspace` 落 14 只 `trg_fk*` 镜像（CASCADE / NO ACTION / MATCH SIMPLE 空值跳过），FK=OFF 套件全绿；**D1 侧经 v0.4.3 支配策略裁定同步回填同款镜像**（`apps/main/migrations/0002_operations_workspace.sql`，事实争议见修订记录——Cloudflare 文档与仓库适配层实证相悖，镜像在两种 regime 下均正确），D1 文件 standalone FK=OFF 测试套件固化；附带勘误 v0.4.2（`run_events` FK 改 NO ACTION） | 已闭环 | ✅ Base A |
 | 5 | 架构评审 | `run_artifacts.content` TEXT 大对象内联风险：Evidence / 执行日志可达 MB 级，威胁 D1 单行/查询内存上限与 SQLite 页分裂（Plan <50KB 内联无虞） | 建议"轻量内联、超限分流"：`plan` 内联；`diagnosis_evidence` / `execution_log` 超 64KB offload 对象存储（R2/S3，`/workspace/.artifacts/<sha256>.blob`），行内 `content` 存摘要/引用，`content_sha256` 始终保留全量哈希（K2 门禁不受影响） | P1 工件服务实现前定标（含 64KB 阈值实测校准） |
 

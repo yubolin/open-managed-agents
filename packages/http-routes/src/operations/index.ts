@@ -2,9 +2,12 @@ import { Hono } from "hono";
 import type { Env } from "@open-managed-agents/shared";
 import {
   OperationsError,
+  globalOperationsStreamHub,
   type AuditActor,
   type OperationsService,
+  type OperationsStreamHubPort,
 } from "@open-managed-agents/operations-store";
+import type { WorkspaceStreamEvent } from "@open-managed-agents/api-types";
 
 export interface OperationsVariables {
   tenant_id: string;
@@ -13,10 +16,48 @@ export interface OperationsVariables {
   operationsService?: OperationsService;
 }
 
-// Ticket store for SSE auth (30s TTL)
-const sseTicketStore = new Map<string, { tenantId: string; userId: string; expiresAt: number }>();
+// Ticket store for SSE auth (30s TTL, single-use, tenant & run bound).
+// Bounded: entries are swept on a throttled TTL cadence and the store
+// FIFO-evicts oldest at capacity, so unredeemed tickets can never grow
+// memory unboundedly (review F4).
+interface TicketEntry {
+  tenantId: string;
+  userId: string;
+  runId?: string;
+  expiresAt: number;
+}
 
-function generateTicket(tenantId: string, userId: string): string {
+const SSE_TICKET_TTL_MS = 30_000;
+const SSE_TICKET_MAX_ENTRIES = 10_000;
+const SSE_TICKET_SWEEP_INTERVAL_MS = 30_000;
+
+const sseTicketStore = new Map<string, TicketEntry>();
+let lastTicketSweepAt = 0;
+
+function sweepExpiredTickets(now: number): void {
+  if (now - lastTicketSweepAt < SSE_TICKET_SWEEP_INTERVAL_MS) return;
+  lastTicketSweepAt = now;
+  for (const [token, entry] of sseTicketStore) {
+    if (now > entry.expiresAt) sseTicketStore.delete(token);
+  }
+}
+
+// Telemetry/testing observation point for store hygiene assertions.
+export function sseTicketStoreStats(): { size: number } {
+  return { size: sseTicketStore.size };
+}
+
+export function generateTicket(tenantId: string, userId: string, runId?: string): string {
+  const now = Date.now();
+  sweepExpiredTickets(now);
+  if (sseTicketStore.size >= SSE_TICKET_MAX_ENTRIES) {
+    // Capacity guard: Map preserves insertion order and TTL is constant, so
+    // the oldest entry is the closest to expiry — FIFO eviction is safe.
+    for (const oldest of sseTicketStore.keys()) {
+      if (sseTicketStore.size < SSE_TICKET_MAX_ENTRIES) break;
+      sseTicketStore.delete(oldest);
+    }
+  }
   const bytes = new Uint8Array(16);
   crypto.getRandomValues(bytes);
   const ticket = Array.from(bytes)
@@ -25,20 +66,37 @@ function generateTicket(tenantId: string, userId: string): string {
   sseTicketStore.set(ticket, {
     tenantId,
     userId,
-    expiresAt: Date.now() + 30_000,
+    runId,
+    expiresAt: now + SSE_TICKET_TTL_MS,
   });
   return ticket;
 }
 
-export function verifyTicket(ticket: string): { tenantId: string; userId: string } | null {
+export function verifyTicket(
+  ticket: string,
+  opts?: { expectedTenantId?: string; expectedRunId?: string }
+): { tenantId: string; userId: string; runId?: string } | null {
   const entry = sseTicketStore.get(ticket);
   if (!entry) return null;
+
+  // Single-use: delete immediately
+  sseTicketStore.delete(ticket);
+
   if (Date.now() > entry.expiresAt) {
-    sseTicketStore.delete(ticket);
     return null;
   }
-  sseTicketStore.delete(ticket); // single use
-  return { tenantId: entry.tenantId, userId: entry.userId };
+
+  // Tenant anti-probing
+  if (opts?.expectedTenantId && entry.tenantId !== opts.expectedTenantId) {
+    return null;
+  }
+
+  // Run binding check
+  if (opts?.expectedRunId && entry.runId && entry.runId !== opts.expectedRunId) {
+    return null;
+  }
+
+  return { tenantId: entry.tenantId, userId: entry.userId, runId: entry.runId };
 }
 
 export function operationsRoutes(getOperationsService: (c: { env: Env; var: Record<string, unknown> }) => OperationsService) {
@@ -361,7 +419,7 @@ export function operationsRoutes(getOperationsService: (c: { env: Env; var: Reco
   });
 
   // --------------------------------------------------------------------------
-  // 4. SSE Ticket (#13)
+  // 4. SSE Ticket & Real-Time Event Stream (#13 & #14)
   // --------------------------------------------------------------------------
 
   // #13 POST /v1/workspace/auth/ticket
@@ -369,7 +427,14 @@ export function operationsRoutes(getOperationsService: (c: { env: Env; var: Reco
     try {
       const tenantId = c.var.tenant_id;
       const userId = c.var.user_id || "user_anonymous";
-      const ticket = generateTicket(tenantId, userId);
+      let runId: string | undefined;
+      try {
+        const body = await c.req.json<{ run_id?: string }>();
+        runId = body?.run_id;
+      } catch {
+        // No body provided
+      }
+      const ticket = generateTicket(tenantId, userId, runId);
       return c.json({
         ticket,
         expires_in_seconds: 30,
@@ -377,6 +442,76 @@ export function operationsRoutes(getOperationsService: (c: { env: Env; var: Reco
     } catch (err) {
       return handleError(c, err);
     }
+  });
+
+  // #14 GET /v1/workspace/runs/:id/events/stream
+  app.get("/runs/:id/events/stream", async (c) => {
+    const runId = c.req.param("id");
+    const token = c.req.query("token");
+    const tenantId = c.var.tenant_id;
+
+    if (!token) {
+      return c.json({ error: "Unauthorized: Missing SSE auth ticket", code: "UNAUTHORIZED" }, 401);
+    }
+
+    const verified = verifyTicket(token, { expectedTenantId: tenantId, expectedRunId: runId });
+    if (!verified) {
+      return c.json({ error: "Unauthorized: Invalid or expired ticket", code: "UNAUTHORIZED" }, 401);
+    }
+
+    const service = c.var.operationsService!;
+    try {
+      const run = await service.getRun(tenantId, runId);
+      if (!run) {
+        return c.json({ error: `Run not found: ${runId}`, code: "RUN_NOT_FOUND" }, 404);
+      }
+    } catch {
+      return c.json({ error: `Run not found: ${runId}`, code: "RUN_NOT_FOUND" }, 404);
+    }
+
+    const encoder = new TextEncoder();
+    let unsubscribe: (() => void) | null = null;
+    let heartbeatTimer: any = null;
+
+    const stream = new ReadableStream({
+      start(controller) {
+        // Initial connected event
+        controller.enqueue(
+          encoder.encode(`event: connected\ndata: ${JSON.stringify({ run_id: runId, status: "connected", ts: Date.now() })}\n\n`)
+        );
+
+        // Subscribe to StreamHub
+        unsubscribe = globalOperationsStreamHub.subscribe(tenantId, runId, (ev: WorkspaceStreamEvent) => {
+          try {
+            const chunk = `event: ${ev.event_type}\ndata: ${JSON.stringify(ev)}\n\n`;
+            controller.enqueue(encoder.encode(chunk));
+          } catch {
+            // Dropped/closed
+          }
+        });
+
+        // 15s keepalive heartbeat
+        heartbeatTimer = setInterval(() => {
+          try {
+            controller.enqueue(encoder.encode(`:heartbeat ${Date.now()}\n\n`));
+          } catch {
+            clearInterval(heartbeatTimer);
+          }
+        }, 15000);
+      },
+      cancel() {
+        if (unsubscribe) unsubscribe();
+        if (heartbeatTimer) clearInterval(heartbeatTimer);
+      },
+    });
+
+    return new Response(stream, {
+      headers: {
+        "content-type": "text/event-stream",
+        "cache-control": "no-cache",
+        connection: "keep-alive",
+      },
+    });
   });
 
   return app;

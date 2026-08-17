@@ -1164,3 +1164,25 @@ export interface WorkspaceAuthTicketResponse {
   ticket: string;
   expires_in_seconds: number;
 }
+
+export type WorkspaceStreamEventType =
+  | "run.state_changed"
+  | "run.artifact_created"
+  | "run.approval_requested"
+  | "run.approval_decided"
+  | "run.interrupted"
+  | "run.cancelled"
+  | "run.heartbeat";
+
+export interface WorkspaceStreamEvent {
+  id: string;
+  run_id: string;
+  tenant_id: string;
+  event_type: WorkspaceStreamEventType;
+  payload: Record<string, unknown>;
+  ts: number;
+}
+
+export interface CreateWorkspaceAuthTicketRequest {
+  run_id?: string;
+}
