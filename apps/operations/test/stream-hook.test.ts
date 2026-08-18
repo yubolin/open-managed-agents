@@ -1,7 +1,15 @@
+// @vitest-environment happy-dom
+// Base D review D3: REAL coverage of useRunStream — the previous version of
+// this file exercised a hand-rolled MockEventSource and never imported the
+// hook. These tests render the actual hook via @testing-library/react.
+
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
+import { renderHook, waitFor } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { createElement, type ReactNode } from "react";
+import { useRunStream } from "../src/lib/use-run-stream";
 import { operationsApi } from "../src/lib/api";
 
-// Mock EventSource implementation for Vitest
 class MockEventSource {
   static instances: MockEventSource[] = [];
   url: string;
@@ -16,21 +24,14 @@ class MockEventSource {
   }
 
   addEventListener(type: string, listener: (e: MessageEvent) => void) {
-    let list = this.listeners.get(type);
-    if (!list) {
-      list = [];
-      this.listeners.set(type, list);
-    }
+    const list = this.listeners.get(type) ?? [];
     list.push(listener);
+    this.listeners.set(type, list);
   }
 
-  emit(type: string, data: any) {
-    const list = this.listeners.get(type);
-    if (list) {
-      const event = { data: JSON.stringify(data) } as MessageEvent;
-      for (const l of list) {
-        l(event);
-      }
+  emit(type: string, data: unknown) {
+    for (const l of this.listeners.get(type) ?? []) {
+      l({ data: JSON.stringify(data) } as MessageEvent);
     }
   }
 
@@ -39,12 +40,16 @@ class MockEventSource {
   }
 }
 
-describe("Base D · Operations Stream Client & EventSource Wiring", () => {
+describe("Base D review · D3 real useRunStream coverage", () => {
   const originalEventSource = (globalThis as any).EventSource;
 
   beforeEach(() => {
     MockEventSource.instances = [];
     (globalThis as any).EventSource = MockEventSource;
+    vi.spyOn(operationsApi, "createAuthTicket").mockResolvedValue({
+      ticket: "tkt_real_hook",
+      expires_in_seconds: 30,
+    });
   });
 
   afterEach(() => {
@@ -52,77 +57,96 @@ describe("Base D · Operations Stream Client & EventSource Wiring", () => {
     vi.restoreAllMocks();
   });
 
-  it("1. Ticket-to-EventSource handshake: acquires single-use ticket and formats URL", async () => {
-    vi.spyOn(operationsApi, "createAuthTicket").mockResolvedValue({
-      ticket: "ticket_mock_123",
-      expires_in_seconds: 30,
+  function createWrapper(client: QueryClient) {
+    return function Wrapper({ children }: { children: ReactNode }) {
+      return createElement(QueryClientProvider, { client }, children);
+    };
+  }
+
+  it("1. Handshake: acquires run-bound ticket first, then opens EventSource with token URL", async () => {
+    const client = new QueryClient();
+    const { result } = renderHook(() => useRunStream("run_hook_1"), {
+      wrapper: createWrapper(client),
     });
 
-    const ticketRes = await operationsApi.createAuthTicket({ run_id: "run_stream_test" });
-    expect(ticketRes.ticket).toBe("ticket_mock_123");
+    await waitFor(() => {
+      expect(MockEventSource.instances.length).toBe(1);
+    });
 
-    const es = new (globalThis as any).EventSource(
-      `/v1/workspace/runs/run_stream_test/events/stream?token=${ticketRes.ticket}`
+    expect(operationsApi.createAuthTicket).toHaveBeenCalledWith({ run_id: "run_hook_1" });
+    expect(MockEventSource.instances[0].url).toBe(
+      "/v1/workspace/runs/run_hook_1/events/stream?token=tkt_real_hook"
     );
-
-    expect(es.url).toBe("/v1/workspace/runs/run_stream_test/events/stream?token=ticket_mock_123");
-    expect(MockEventSource.instances.length).toBe(1);
+    expect(result.current.isConnected).toBe(false); // connected only after onopen/connected frame
   });
 
-  it("2. Event dispatching: parses typed workspace stream events from stream chunks", async () => {
-    const es = new MockEventSource("/v1/workspace/runs/run_event_test/events/stream?token=ticket_456");
+  it("2. Event dispatching: stream events invalidate run/runs plus targeted query families", async () => {
+    const client = new QueryClient();
+    const invalidateSpy = vi.spyOn(client, "invalidateQueries");
+    renderHook(() => useRunStream("run_hook_2"), { wrapper: createWrapper(client) });
 
-    const receivedEvents: any[] = [];
-    es.addEventListener("run.state_changed", (e: MessageEvent) => {
-      receivedEvents.push(JSON.parse(e.data));
+    await waitFor(() => {
+      expect(MockEventSource.instances.length).toBe(1);
     });
-    es.addEventListener("run.artifact_created", (e: MessageEvent) => {
-      receivedEvents.push(JSON.parse(e.data));
-    });
+    invalidateSpy.mockClear();
 
-    // Emit run.state_changed
-    es.emit("run.state_changed", {
-      id: "wev_1",
-      run_id: "run_event_test",
-      tenant_id: "tenant_default",
-      event_type: "run.state_changed",
-      payload: { from: "planning", to: "awaiting_approval" },
-      ts: 1000,
-    });
-
-    // Emit run.artifact_created
+    const es = MockEventSource.instances[0];
     es.emit("run.artifact_created", {
-      id: "wev_2",
-      run_id: "run_event_test",
+      id: "wev_1",
+      run_id: "run_hook_2",
       tenant_id: "tenant_default",
       event_type: "run.artifact_created",
-      payload: { artifact_type: "plan", version: 1 },
-      ts: 1001,
+      payload: {},
+      ts: 1,
+    });
+    es.emit("run.approval_decided", {
+      id: "wev_2",
+      run_id: "run_hook_2",
+      tenant_id: "tenant_default",
+      event_type: "run.approval_decided",
+      payload: {},
+      ts: 2,
     });
 
-    expect(receivedEvents.length).toBe(2);
-    expect(receivedEvents[0].event_type).toBe("run.state_changed");
-    expect(receivedEvents[0].payload.to).toBe("awaiting_approval");
-    expect(receivedEvents[1].event_type).toBe("run.artifact_created");
-    expect(receivedEvents[1].payload.artifact_type).toBe("plan");
-
-    es.close();
-    expect(es.closed).toBe(true);
+    const invalidated = invalidateSpy.mock.calls.map((call) => JSON.stringify(call[0]?.queryKey));
+    expect(invalidated).toContain(JSON.stringify(["workspace", "run", "run_hook_2"]));
+    expect(invalidated).toContain(JSON.stringify(["workspace", "runs"]));
+    expect(invalidated).toContain(JSON.stringify(["workspace", "artifacts", "run_hook_2"]));
+    expect(invalidated).toContain(JSON.stringify(["workspace", "approvals"]));
   });
 
-  it("3. Error handling: closes connection on stream termination", async () => {
-    const es = new MockEventSource("/v1/workspace/runs/run_err_test/events/stream?token=ticket_789");
+  it("3. Stream error: closes the EventSource and reports disconnected status", async () => {
+    const client = new QueryClient();
+    const { result } = renderHook(() => useRunStream("run_hook_3"), {
+      wrapper: createWrapper(client),
+    });
 
-    let isConnected = true;
-    es.onerror = () => {
-      isConnected = false;
-      es.close();
-    };
+    await waitFor(() => {
+      expect(MockEventSource.instances.length).toBe(1);
+    });
 
-    // Trigger error
-    es.onerror();
+    MockEventSource.instances[0].onerror?.();
 
-    expect(isConnected).toBe(false);
-    expect(es.closed).toBe(true);
+    expect(MockEventSource.instances[0].closed).toBe(true);
+    // setStatus fired outside act() — flush the re-render before asserting
+    await waitFor(() => {
+      expect(result.current.status).toBe("disconnected");
+    });
+    expect(result.current.isConnected).toBe(false);
+  });
+
+  it("4. Unmount: closes the EventSource (no leaked producer)", async () => {
+    const client = new QueryClient();
+    const { unmount } = renderHook(() => useRunStream("run_hook_4"), {
+      wrapper: createWrapper(client),
+    });
+
+    await waitFor(() => {
+      expect(MockEventSource.instances.length).toBe(1);
+    });
+
+    unmount();
+
+    expect(MockEventSource.instances[0].closed).toBe(true);
   });
 });

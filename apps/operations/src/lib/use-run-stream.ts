@@ -1,14 +1,19 @@
 // SSE Real-Time Stream Hook for Operations Workspace (Base D)
-// Manages 30s Ticket lifecycle, EventSource connection, event dispatching, and cache invalidation.
+// Manages 30s Ticket lifecycle, EventSource connection, event dispatching,
+// and cache invalidation. Reconnect is deliberately NOT attempted here:
+// tickets are single-use, so a naive EventSource auto-reconnect would 401
+// forever with the consumed token (debt F6 — re-ticket contract pending).
 
 import { useEffect, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { operationsApi } from "./api";
 import type { WorkspaceStreamEvent } from "@open-managed-agents/api-types";
 
+export type RunStreamStatus = "connecting" | "connected" | "disconnected";
+
 export function useRunStream(runId: string | undefined) {
   const queryClient = useQueryClient();
-  const [isConnected, setIsConnected] = useState(false);
+  const [status, setStatus] = useState<RunStreamStatus>("connecting");
   const [lastEvent, setLastEvent] = useState<WorkspaceStreamEvent | null>(null);
   const esRef = useRef<EventSource | null>(null);
 
@@ -28,7 +33,7 @@ export function useRunStream(runId: string | undefined) {
         esRef.current = es;
 
         es.onopen = () => {
-          if (isMounted) setIsConnected(true);
+          if (isMounted) setStatus("connected");
         };
 
         // Standard event listeners
@@ -53,7 +58,7 @@ export function useRunStream(runId: string | undefined) {
         };
 
         es.addEventListener("connected", () => {
-          if (isMounted) setIsConnected(true);
+          if (isMounted) setStatus("connected");
         });
 
         es.addEventListener("run.state_changed", handleEvent as EventListener);
@@ -65,12 +70,14 @@ export function useRunStream(runId: string | undefined) {
 
         es.onerror = () => {
           if (isMounted) {
-            setIsConnected(false);
+            // One-time ticket is spent: native reconnect would 401-loop, so
+            // close and surface the stale state instead (F6 owns re-ticket).
+            setStatus("disconnected");
             es.close();
           }
         };
       } catch (err) {
-        if (isMounted) setIsConnected(false);
+        if (isMounted) setStatus("disconnected");
       }
     }
 
@@ -85,5 +92,5 @@ export function useRunStream(runId: string | undefined) {
     };
   }, [runId, queryClient]);
 
-  return { isConnected, lastEvent };
+  return { status, isConnected: status === "connected", lastEvent };
 }

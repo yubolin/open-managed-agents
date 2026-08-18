@@ -30,8 +30,9 @@ export function RunDetailPage() {
   const [cancelReason, setCancelReason] = useState("");
   const [reworkComment, setReworkComment] = useState("");
 
-  // SSE StreamHook (<2s SLA)
-  const { isConnected } = useRunStream(id);
+  // SSE StreamHook (<2s SLA); status surfaces stale streams (one-time
+  // tickets mean no auto-reconnect — F6 re-ticket contract pending)
+  const { status: streamStatus } = useRunStream(id);
 
   // Fetch Run Detail
   const { data, isLoading } = useQuery({
@@ -106,10 +107,16 @@ export function RunDetailPage() {
             <div className="text-xs text-slate-400 flex items-center gap-3 mt-1">
               <span>申请人: <span className="font-mono text-slate-200">{run.created_by}</span></span>
               <span>创建时间: <span className="font-mono text-slate-200">{formatDate(run.created_at)}</span></span>
-              {isConnected && (
+              {streamStatus === "connected" && (
                 <span className="flex items-center gap-1 text-[11px] text-emerald-400 font-mono">
                   <Radio className="w-3 h-3 animate-pulse" />
                   SSE 实时监听中
+                </span>
+              )}
+              {streamStatus === "disconnected" && (
+                <span className="flex items-center gap-1 text-[11px] text-amber-400 font-mono">
+                  <AlertTriangle className="w-3 h-3" />
+                  实时连接已断开，数据可能已过期
                 </span>
               )}
             </div>

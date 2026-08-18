@@ -1,4 +1,5 @@
 import { useState, type FormEvent } from "react";
+import { validateRequiredFields } from "../lib/utils";
 
 interface DynamicFormProps {
   formSchema: Record<string, any> | null;
@@ -46,13 +47,7 @@ export function DynamicForm({
 
   const handleSubmit = (e: FormEvent) => {
     e.preventDefault();
-    const newErrors: Record<string, string> = {};
-
-    for (const req of requiredFields) {
-      if (formData[req] === undefined || formData[req] === null || formData[req] === "") {
-        newErrors[req] = "此项为必填项";
-      }
-    }
+    const newErrors = validateRequiredFields(requiredFields, formData);
 
     if (Object.keys(newErrors).length > 0) {
       setErrors(newErrors);

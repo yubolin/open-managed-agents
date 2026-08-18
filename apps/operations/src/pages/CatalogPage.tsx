@@ -169,15 +169,15 @@ export function CatalogPage() {
               <div className="py-12 text-center text-xs text-slate-400 animate-pulse">
                 加载模板表单配置中...
               </div>
-            ) : detailData?.template ? (
+            ) : detailData?.version ? (
               <div className="space-y-4">
                 <DynamicForm
-                  formSchema={detailData.template.form_schema}
-                  uiSchema={detailData.template.ui_schema}
+                  formSchema={detailData.version.form_schema}
+                  uiSchema={detailData.version.ui_schema}
                   onSubmit={(values) => {
                     createMutation.mutate({
                       template_id: detailData.template.id,
-                      template_version_id: detailData.template.version_id,
+                      template_version_id: detailData.version.id,
                       title: `${detailData.template.name} - ${new Date().toLocaleTimeString()}`,
                       input_parameters: values,
                       auto_submit: true,

@@ -62,3 +62,39 @@ export function getStateMeta(state: WorkspaceRunState): {
       return { label: state, badgeClass: "bg-slate-800 text-slate-300 border-slate-700", dotClass: "bg-slate-400", category: "pending" };
   }
 }
+
+/**
+ * SoD guard: the applicant cannot approve their own run. The server-side
+ * SoD check (Base B) is the authority; this UI guard is defense-in-depth.
+ */
+export function isSelfApproval(
+  runCreatedBy: string | null | undefined,
+  currentUserId: string
+): boolean {
+  return !!runCreatedBy && runCreatedBy === currentUserId;
+}
+
+/**
+ * Required-field validation shared by DynamicForm (extracted from the
+ * component so tests hit the real production path).
+ */
+export function validateRequiredFields(
+  requiredFields: string[],
+  values: Record<string, any>
+): Record<string, string> {
+  const errors: Record<string, string> = {};
+  for (const field of requiredFields) {
+    if (values[field] === undefined || values[field] === null || values[field] === "") {
+      errors[field] = "此项为必填项";
+    }
+  }
+  return errors;
+}
+
+/** Current operator identity: localStorage override, demo persona fallback. */
+export function getCurrentUserId(): string {
+  if (typeof localStorage !== "undefined") {
+    return localStorage.getItem("openma_user_id") || "user_operator_bob";
+  }
+  return "user_operator_bob";
+}

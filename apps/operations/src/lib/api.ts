@@ -12,8 +12,8 @@ import type {
   WorkspaceAuthTicketResponse,
   WorkspaceRunDetailResponse,
   WorkspaceRunsListResponse,
-  WorkspaceServiceTemplateDetail,
   WorkspaceServiceTemplatesListResponse,
+  WorkspaceTemplateVersionResponse,
 } from "@open-managed-agents/api-types";
 
 const BASE_URL = "/v1/workspace";
@@ -29,6 +29,12 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
     (typeof localStorage !== "undefined" ? localStorage.getItem("openma_tenant_id") : null) ||
     "tenant_default";
   headers.set("x-tenant-id", tenantId);
+
+  // Operator identity when set (drives server-side audit actor + SoD);
+  // absent header falls back to user_anonymous server-side.
+  const userId =
+    typeof localStorage !== "undefined" ? localStorage.getItem("openma_user_id") : null;
+  if (userId) headers.set("x-user-id", userId);
 
   const res = await fetch(`${BASE_URL}${path}`, {
     ...options,
@@ -56,8 +62,11 @@ export const operationsApi = {
     return request<WorkspaceServiceTemplatesListResponse>(`/templates${qs}`);
   },
 
-  getTemplate: async (id: string) => {
-    return request<{ template: WorkspaceServiceTemplateDetail }>(`/templates/${id}`);
+  // GET /v1/workspace/templates/:id/version — template item + parsed version
+  // (form_schema/approval_policy live on the version, not the template item)
+  getTemplate: async (id: string, versionId?: string) => {
+    const qs = versionId ? `?version_id=${encodeURIComponent(versionId)}` : "";
+    return request<WorkspaceTemplateVersionResponse>(`/templates/${id}/version${qs}`);
   },
 
   // 2. Runs

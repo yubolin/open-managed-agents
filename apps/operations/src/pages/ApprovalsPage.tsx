@@ -12,7 +12,7 @@ import {
 import { operationsApi } from "../lib/api";
 import { StateBadge } from "../components/StateBadge";
 import { HashBadge } from "../components/HashBadge";
-import { cn } from "../lib/utils";
+import { cn, getCurrentUserId, isSelfApproval } from "../lib/utils";
 import type { WorkspaceRunState } from "@open-managed-agents/api-types";
 
 export function ApprovalsPage() {
@@ -27,8 +27,9 @@ export function ApprovalsPage() {
 
   const [comment, setComment] = useState("");
 
-  // Current logged in user for SoD check (Bob)
-  const currentUserId = "user_operator_bob";
+  // Current operator identity for the client-side SoD guard (demo persona
+  // fallback until real auth lands; server-side SoD remains the authority)
+  const currentUserId = getCurrentUserId();
 
   // Query pending approvals
   const { data, isLoading } = useQuery({
@@ -108,7 +109,7 @@ export function ApprovalsPage() {
         <div className="space-y-4">
           {approvals.map((appr) => {
             // SoD Check: if run applicant is current user -> self-approval forbidden
-            const isSelfCreated = appr.created_by === currentUserId;
+            const isSelfCreated = isSelfApproval(appr.created_by, currentUserId);
 
             return (
               <div

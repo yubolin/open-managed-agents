@@ -140,6 +140,26 @@ describe("Base D · Operations API Client Suite", () => {
     expect(res.expires_in_seconds).toBe(30);
   });
 
+  it("6. getTemplate: calls GET /templates/:id/version with optional version_id (D1 regression)", async () => {
+    let capturedUrl = "";
+    globalThis.fetch = vi.fn(async (url: RequestInfo | URL) => {
+      capturedUrl = url.toString();
+      return new Response(
+        JSON.stringify({
+          template: { id: "stpl_1", name: "T", version: 2 },
+          version: { id: "stplv_2", form_schema: { type: "object" } },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } }
+      );
+    });
+
+    await operationsApi.getTemplate("stpl_1");
+    expect(capturedUrl).toBe("/v1/workspace/templates/stpl_1/version");
+
+    await operationsApi.getTemplate("stpl_1", "stplv_9");
+    expect(capturedUrl).toBe("/v1/workspace/templates/stpl_1/version?version_id=stplv_9");
+  });
+
   it("5. Error handling: parses server error JSON into Error message", async () => {
     globalThis.fetch = vi.fn(async () => {
       return new Response(

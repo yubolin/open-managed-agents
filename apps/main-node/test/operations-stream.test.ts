@@ -356,3 +356,109 @@ describe("Base C · Operations Workspace SSE StreamHub & Triple-Gate Auth", () =
     }
   });
 });
+
+describe("Base D review · D2 production tenant wiring & ticket-authority SSE", () => {
+  // Production reality: main-node mounts operationsRoutes bare — no upstream
+  // middleware injects tenant context. Context must derive from headers, and
+  // the SSE stream (EventSource cannot send custom headers) must authorize
+  // from the ticket's own tenant binding.
+  let store: InMemoryOperationsStore;
+  let service: OperationsService;
+  let bareApp: Hono;
+
+  const tenantId = "tenant_d2_test";
+  const userId = "user_operator_bob";
+
+  beforeEach(async () => {
+    store = new InMemoryOperationsStore();
+    service = new OperationsService(store);
+
+    await store.insertTemplate(
+      {
+        id: "stpl_d2_diag",
+        tenant_id: tenantId,
+        name: "D2 Diagnosis",
+        code: "d2_diag",
+        category: "diagnostic",
+        description: "Template for D2 wiring tests",
+        is_active: 1,
+        current_version_id: "stplv_d2_1",
+        created_by: "system",
+        created_at: 1000,
+        updated_at: 1000,
+      },
+      {
+        id: "stplv_d2_1",
+        template_id: "stpl_d2_diag",
+        tenant_id: tenantId,
+        version: 1,
+        is_active: 1,
+        agent_binding: JSON.stringify({ agent_id: "agent_diag", version: 1 }),
+        form_schema: JSON.stringify({ type: "object", properties: { p: { type: "string" } } }),
+        ui_schema: null,
+        approval_policy: JSON.stringify({
+          mode: "sequential_groups",
+          stages: [{ stage_order: 1, stage_name: "Lead", group_id: "grp_lead", required_approvals: 1 }],
+        }),
+        timeout_policy: JSON.stringify({ approval_timeout_minutes: 30 }),
+        changelog: "v1.0",
+        published_by: "system",
+        published_at: 1000,
+      }
+    );
+
+    // Bare mount: NO context-injecting middleware — mirrors apps/main-node.
+    const root = new Hono();
+    root.route("/v1/workspace", operationsRoutes(() => service));
+    bareApp = root;
+  });
+
+  it("D2-a: non-stream request without any tenant context is 401", async () => {
+    const res = await bareApp.request("http://localhost/v1/workspace/templates");
+    expect(res.status).toBe(401);
+  });
+
+  it("D2-b: x-tenant-id header derives tenant context (production wiring path)", async () => {
+    const res = await bareApp.request("http://localhost/v1/workspace/templates", {
+      headers: { "x-tenant-id": tenantId },
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json<{ templates: unknown[] }>();
+    expect(Array.isArray(body.templates)).toBe(true);
+  });
+
+  it("D2-c: SSE stream without headers authorizes via ticket-bound tenant (EventSource reality)", async () => {
+    const run = await service.createRun({
+      tenantId,
+      templateId: "stpl_d2_diag",
+      title: "Ticket-authority SSE",
+      inputParameters: {},
+      actor: { type: "user", id: userId },
+      autoSubmit: false,
+    });
+
+    const ticket = generateTicket(tenantId, userId, run.id);
+    const res = await bareApp.request(
+      `http://localhost/v1/workspace/runs/${run.id}/events/stream?token=${ticket}`
+    );
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toBe("text/event-stream");
+  });
+
+  it("D2-d: cross-tenant ticket without headers gets 404 anti-probing", async () => {
+    const run = await service.createRun({
+      tenantId,
+      templateId: "stpl_d2_diag",
+      title: "Anti-probing run",
+      inputParameters: {},
+      actor: { type: "user", id: userId },
+      autoSubmit: false,
+    });
+
+    const intruderTicket = generateTicket("tenant_intruder_d2", "user_intruder", run.id);
+    const res = await bareApp.request(
+      `http://localhost/v1/workspace/runs/${run.id}/events/stream?token=${intruderTicket}`
+    );
+    expect(res.status).toBe(404);
+  });
+});

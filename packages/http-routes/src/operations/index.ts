@@ -105,10 +105,29 @@ export function operationsRoutes(getOperationsService: (c: { env: Env; var: Reco
     Variables: OperationsVariables;
   }>();
 
-  // Middleware to ensure operationsService & tenant context
+  // Derive tenant/user context from headers when no upstream auth layer
+  // injected it (main-node mounts this router bare in production). Tests and
+  // future gateways that pre-set the context are not overridden.
+  app.use("*", async (c, next) => {
+    if (!c.var.tenant_id) {
+      const headerTenant = c.req.header("x-tenant-id");
+      if (headerTenant) c.set("tenant_id" as any, headerTenant);
+    }
+    if (!c.var.user_id) {
+      const headerUser = c.req.header("x-user-id");
+      if (headerUser) c.set("user_id" as any, headerUser);
+    }
+    await next();
+  });
+
+  // Middleware to ensure operationsService & tenant context. The SSE stream
+  // endpoint is exempt from the tenant requirement: EventSource cannot send
+  // custom headers, so the stream authorizes via the single-use ticket's own
+  // tenant binding instead (see GET /runs/:id/events/stream).
   app.use("*", async (c, next) => {
     const tenantId = c.var.tenant_id;
-    if (!tenantId) {
+    const isEventStream = c.req.path.endsWith("/events/stream");
+    if (!tenantId && !isEventStream) {
       return c.json({ error: "Unauthorized: Missing tenant context", code: "UNAUTHORIZED" }, 401);
     }
     c.set("operationsService", getOperationsService(c));
@@ -454,14 +473,17 @@ export function operationsRoutes(getOperationsService: (c: { env: Env; var: Reco
       return c.json({ error: "Unauthorized: Missing SSE auth ticket", code: "UNAUTHORIZED" }, 401);
     }
 
-    const verified = verifyTicket(token, { expectedTenantId: tenantId, expectedRunId: runId });
+    // When an explicit tenant context exists (header/injected), the ticket
+    // must match it. When it does not (browser EventSource cannot send
+    // headers), the ticket's own tenant binding is the authority.
+    const verified = verifyTicket(token, { expectedTenantId: tenantId || undefined, expectedRunId: runId });
     if (!verified) {
       return c.json({ error: "Unauthorized: Invalid or expired ticket", code: "UNAUTHORIZED" }, 401);
     }
 
     const service = c.var.operationsService!;
     try {
-      const run = await service.getRun(tenantId, runId);
+      const run = await service.getRun(verified.tenantId, runId);
       if (!run) {
         return c.json({ error: `Run not found: ${runId}`, code: "RUN_NOT_FOUND" }, 404);
       }

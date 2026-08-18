@@ -1,27 +1,18 @@
 import { describe, expect, it } from "vitest";
-import { getStateMeta, shortHash } from "../src/lib/utils";
+import {
+  getStateMeta,
+  getCurrentUserId,
+  isSelfApproval,
+  shortHash,
+  validateRequiredFields,
+} from "../src/lib/utils";
 
 describe("Base D · UI Defense Guards & Domain Alignments", () => {
-  it("1. SoD Guard: detects self-created runs to block applicant self-approval", () => {
-    const currentUserId = "user_operator_bob";
-
-    const applicantRun = {
-      run_id: "run_applicant_1",
-      created_by: "user_operator_bob",
-      title: "Self Created Change Plan",
-    };
-
-    const peerRun = {
-      run_id: "run_peer_2",
-      created_by: "user_sre_alice",
-      title: "Peer SRE Change Plan",
-    };
-
-    // Business rule: applicant cannot approve own run
-    const isSelfApprovalBlocked = (runCreatedBy: string, userId: string) => runCreatedBy === userId;
-
-    expect(isSelfApprovalBlocked(applicantRun.created_by, currentUserId)).toBe(true);
-    expect(isSelfApprovalBlocked(peerRun.created_by, currentUserId)).toBe(false);
+  it("1. SoD Guard: isSelfApproval (real util used by ApprovalsPage) detects applicant identity", () => {
+    expect(isSelfApproval("user_operator_bob", "user_operator_bob")).toBe(true);
+    expect(isSelfApproval("user_sre_alice", "user_operator_bob")).toBe(false);
+    expect(isSelfApproval(undefined, "user_operator_bob")).toBe(false);
+    expect(isSelfApproval(null, "user_operator_bob")).toBe(false);
   });
 
   it("2. Dual-Hash Guard: validates presence and format of plan_hash and evidence_hash", () => {
@@ -59,36 +50,34 @@ describe("Base D · UI Defense Guards & Domain Alignments", () => {
     }
   });
 
-  it("4. Form Validation: required fields in form_schema enforce non-empty values", () => {
-    const formSchema = {
-      type: "object",
-      required: ["cluster_name", "target_pod"],
-      properties: {
-        cluster_name: { type: "string", title: "集群名称" },
-        target_pod: { type: "string", title: "目标 Pod" },
-        dry_run: { type: "boolean", title: "演练模式" },
-      },
+  it("4. Form Validation: validateRequiredFields (real util used by DynamicForm) enforces non-empty values", () => {
+    const required = ["cluster_name", "target_pod"];
+
+    expect(validateRequiredFields(required, { cluster_name: "k8s-prod-01" })).toEqual({
+      target_pod: "此项为必填项",
+    });
+    expect(
+      validateRequiredFields(required, { cluster_name: "k8s-prod-01", target_pod: "api-gateway-7b9" })
+    ).toEqual({});
+    expect(validateRequiredFields(required, { cluster_name: "", target_pod: null })).toEqual({
+      cluster_name: "此项为必填项",
+      target_pod: "此项为必填项",
+    });
+  });
+
+  it("5. Current user identity: localStorage override with demo fallback", () => {
+    expect(getCurrentUserId()).toBe("user_operator_bob");
+    const store = new Map<string, string>([["openma_user_id", "user_sre_alice"]]);
+    (globalThis as any).localStorage = {
+      getItem: (k: string) => store.get(k) ?? null,
+      setItem: (k: string, v: string) => store.set(k, v),
+      removeItem: (k: string) => store.delete(k),
+      clear: () => store.clear(),
     };
-
-    const validateForm = (schema: typeof formSchema, values: Record<string, any>) => {
-      const errors: Record<string, string> = {};
-      for (const req of schema.required) {
-        if (values[req] === undefined || values[req] === null || values[req] === "") {
-          errors[req] = "此项为必填项";
-        }
-      }
-      return { isValid: Object.keys(errors).length === 0, errors };
-    };
-
-    const invalidSubmission = { cluster_name: "k8s-prod-01" };
-    const validSubmission = { cluster_name: "k8s-prod-01", target_pod: "api-gateway-7b9" };
-
-    const check1 = validateForm(formSchema, invalidSubmission);
-    expect(check1.isValid).toBe(false);
-    expect(check1.errors.target_pod).toBe("此项为必填项");
-
-    const check2 = validateForm(formSchema, validSubmission);
-    expect(check2.isValid).toBe(true);
-    expect(check2.errors).toEqual({});
+    try {
+      expect(getCurrentUserId()).toBe("user_sre_alice");
+    } finally {
+      delete (globalThis as any).localStorage;
+    }
   });
 });

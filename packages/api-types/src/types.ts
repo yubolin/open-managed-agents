@@ -1207,6 +1207,27 @@ export interface WorkspaceServiceTemplateDetail extends WorkspaceServiceTemplate
   timeout_policy: Record<string, any>;
 }
 
+/** Parsed version payload of GET /v1/workspace/templates/:id/version */
+export interface WorkspaceTemplateVersionDetail {
+  id: string;
+  template_id: string;
+  version: number;
+  is_active: number;
+  agent_binding: Record<string, any>;
+  form_schema: Record<string, any>;
+  ui_schema?: Record<string, any> | null;
+  approval_policy: Record<string, any>;
+  timeout_policy: Record<string, any>;
+  changelog?: string | null;
+  published_by?: string | null;
+  published_at?: number | null;
+}
+
+export interface WorkspaceTemplateVersionResponse {
+  template: WorkspaceServiceTemplateItem;
+  version: WorkspaceTemplateVersionDetail;
+}
+
 export interface WorkspaceRunDetailResponse {
   run: WorkspaceRunDto;
 }
