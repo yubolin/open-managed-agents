@@ -1170,6 +1170,7 @@ export type WorkspaceStreamEventType =
   | "run.artifact_created"
   | "run.approval_requested"
   | "run.approval_decided"
+  | "run.escalation"
   | "run.interrupted"
   | "run.cancelled"
   | "run.heartbeat";

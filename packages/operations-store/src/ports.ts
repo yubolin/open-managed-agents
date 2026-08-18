@@ -32,6 +32,13 @@ export interface OperationsStorePort {
   // Runs & CAS State Transitions
   getRun(tenantId: string, runId: string): Promise<RunRow | null>;
   listRuns(tenantId: string, options?: ListRunsOptions): Promise<RunRow[]>;
+  /**
+   * SYSTEM-LEVEL scan across ALL tenants for runs parked in awaiting_approval.
+   * Sole consumer: the approval-timeout scheduler (a system component, not a
+   * user request path). NEVER expose through the BFF — user-facing queries
+   * must stay tenant-prefixed (D0 §6.1).
+   */
+  listAwaitingApprovalRunsSystem(limit: number): Promise<RunRow[]>;
   insertRun(run: RunRow): Promise<void>;
   /**
    * Atomic CAS update: updates run fields ONLY IF current state === fromState.

@@ -1,6 +1,6 @@
 // Drizzle SQL Adapter for Operations Workspace Store across D1 / SQLite / PG.
 
-import { and, desc, eq } from "drizzle-orm";
+import { and, asc, desc, eq } from "drizzle-orm";
 import {
   asBuilder,
   atomicWrite,
@@ -230,6 +230,18 @@ export class DrizzleOperationsStore implements OperationsStorePort {
       query = query.offset(options.offset) as typeof query;
     }
 
+    const rows = await getAll(query);
+    return rows as unknown as RunRow[];
+  }
+
+  async listAwaitingApprovalRunsSystem(limit: number): Promise<RunRow[]> {
+    // Scheduler-only system scan (see ports.ts note) — oldest-updated first.
+    const query = this.db
+      .select()
+      .from(runs)
+      .where(eq(runs.state, "awaiting_approval"))
+      .orderBy(asc(runs.updated_at))
+      .limit(limit);
     const rows = await getAll(query);
     return rows as unknown as RunRow[];
   }

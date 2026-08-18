@@ -109,6 +109,28 @@ export class FeishuApiClient {
   }
 
   /**
+   * POST im/v1/messages — send an interactive card into a chat.
+   *
+   * Same envelope as sendText but `msg_type=interactive`; the card object is
+   * JSON-stringified into `content` per the Feishu messaging API. Used by the
+   * operations approval-timeout scheduler for escalation notifications.
+   */
+  async sendCard(input: {
+    chatId: string;
+    card: unknown;
+  }): Promise<{ messageId: string }> {
+    const res = await this.postJson<{ message_id: string }>(
+      "/im/v1/messages?receive_id_type=chat_id",
+      {
+        receive_id: input.chatId,
+        msg_type: "interactive",
+        content: JSON.stringify(input.card),
+      },
+    );
+    return { messageId: res.message_id };
+  }
+
+  /**
    * POST im/v1/messages/{id}/reply — reply to a specific inbound message.
    *
    * Used by the automatic-egress path so bot replies thread under the user's

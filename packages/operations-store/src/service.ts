@@ -112,6 +112,14 @@ export class OperationsService {
   }
 
   /**
+   * System-level scan for the approval-timeout scheduler (Base E). Not a
+   * user-facing query — see ports.listAwaitingApprovalRunsSystem.
+   */
+  async listAwaitingApprovalRuns(limit = 200): Promise<RunRow[]> {
+    return this.store.listAwaitingApprovalRunsSystem(limit);
+  }
+
+  /**
    * Journey 1: Create Run and optionally auto-submit (K1 version snapshot).
    */
   async createRun(params: CreateRunParams): Promise<RunRow> {

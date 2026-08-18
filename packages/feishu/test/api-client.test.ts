@@ -176,6 +176,33 @@ describe("api/client — FeishuApiClient", () => {
     });
   });
 
+  describe("sendCard", () => {
+    it("POSTs to im/v1/messages with msg_type=interactive and card content", async () => {
+      http.pushScript(() => ok({ tenant_access_token: "t", expire: 7200 }));
+      http.pushScript(() => ok({ message_id: "om_card_1" }));
+
+      const card = {
+        header: { title: { tag: "plain_text", content: "审批超时催办" } },
+        elements: [{ tag: "div", text: { tag: "lark_md", content: "run_x 已等待 30 分钟" } }],
+      };
+      const { messageId } = await client.sendCard({ chatId: "oc_chat", card });
+      expect(messageId).toBe("om_card_1");
+
+      const sendCall = http.calls[1]!;
+      expect(sendCall.url).toBe(
+        "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=chat_id",
+      );
+      // Interactive cards travel as msg_type=interactive with the card
+      // object JSON-stringified into `content` (same envelope as text).
+      expect(JSON.parse(sendCall.body ?? "{}")).toEqual({
+        receive_id: "oc_chat",
+        msg_type: "interactive",
+        content: JSON.stringify(card),
+      });
+      expect(sendCall.headers?.authorization).toBe("Bearer t");
+    });
+  });
+
   describe("replyText", () => {
     it("POSTs to im/v1/messages/{id}/reply with no receive_id", async () => {
       http.pushScript(() => ok({ tenant_access_token: "t", expire: 7200 }));

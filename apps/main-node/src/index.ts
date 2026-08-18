@@ -381,6 +381,7 @@ const memoryWatcher = memoryBlobLocalDir && useQueue
 
 let s3Poller: { stop: () => Promise<void> } | null = null;
 let feishuRunner: { stop: () => Promise<void> } | null = null;
+let operationsTimeoutScheduler: { stop: () => Promise<void> } | null = null;
 if (s3MemoryConfig) {
   // memory_blob_poller_lease lives in the consolidated baseline already; no
   // separate schema bootstrap needed here.
@@ -1322,6 +1323,41 @@ app.route("/v1/oma/evals", buildEvalRoutes({
 const operationsService = createOperationsService(drizzleDb);
 app.route("/v1/workspace", operationsRoutes(() => operationsService));
 
+// Base E · approval timeout scheduler (run-model spec §6.3 裁决 5). In-process
+// tick loop over awaiting_approval runs; fires template escalation_actions
+// (催办 card / policy cancel via the same CAS path as a human cancel). NEVER
+// auto-approves — that invariant lives in the scheduler module, not config.
+// Card egress uses explicit bootstrap-tier env credentials: routing a chat_id
+// to the right Feishu App via the publications table needs a chat↔App mapping
+// that doesn't exist yet (debt E-N1), so P0 does not guess. Without creds the
+// scheduler still cancels and audits; cards degrade to delivered:false.
+if (process.env.OPERATIONS_TIMEOUT_SCHEDULER !== "0") {
+  const { startOperationsTimeoutScheduler } = await import(
+    "./lib/operations-timeout-scheduler.js"
+  );
+  const feishuAppId = process.env.OPERATIONS_FEISHU_APP_ID ?? null;
+  const feishuAppSecret = process.env.OPERATIONS_FEISHU_APP_SECRET ?? null;
+  let cardSender: (chatId: string, card: unknown) => Promise<void> = async () => {
+    throw new Error("OPERATIONS_FEISHU_APP_ID/SECRET not configured (card egress disabled)");
+  };
+  if (feishuAppId && feishuAppSecret) {
+    const { FeishuApiClient } = await import("@open-managed-agents/feishu");
+    const cardClient = new FeishuApiClient(
+      { appId: feishuAppId, appSecret: feishuAppSecret },
+      new WorkerHttpClient(),
+    );
+    cardSender = async (chatId, card) => {
+      await cardClient.sendCard({ chatId, card });
+    };
+  }
+  operationsTimeoutScheduler = startOperationsTimeoutScheduler({
+    service: operationsService,
+    sendCard: cardSender,
+    intervalMs: Number(process.env.OPERATIONS_TIMEOUT_INTERVAL_MS ?? 60_000),
+    workspaceBaseUrl: process.env.OPERATIONS_WORKSPACE_BASE_URL ?? "http://localhost:5175",
+  });
+}
+
 // /v1/oma/integrations mirror — same factory used twice. New OMA-only
 // endpoints (if any) get added in the package, not here.
 if (platformRootSecret) {
@@ -1467,6 +1503,9 @@ const shutdown = async (signal: string) => {
   }
   if (feishuRunner) {
     try { await feishuRunner.stop(); } catch (err) { logger.warn({ err, op: "main-node.shutdown.feishu_runner_stop_failed" }, "feishu ws runner stop failed"); }
+  }
+  if (operationsTimeoutScheduler) {
+    try { await operationsTimeoutScheduler.stop(); } catch (err) { logger.warn({ err, op: "main-node.shutdown.operations_timeout_stop_failed" }, "operations timeout scheduler stop failed"); }
   }
   if (hub instanceof PgEventStreamHub) {
     try { await hub.stop(); } catch (err) { logger.warn({ err, op: "main-node.shutdown.pg_hub_stop_failed" }, "pg-hub stop failed"); }

@@ -2,6 +2,7 @@
 
 > 状态：v0.4 · **评审定稿**（2026-08-17）
 > 修订记录：
+> - v0.4.6（2026-08-18）：新增 §3.6 审批超时调度器（Base E）——超时升级动作语义、`run.escalation` SSE 事件类型、系统取消审计与部署开关；不改变任何既有端点契约。
 > - v0.4（2026-08-17）：闭合 Review R0——API 契约面自 7 个端点找回补全至 **13 个**：恢复服务目录接口（§3.1 #1/#2）、Run 查询与回看接口（§3.3 #7 列表 / #8 详情 / #9 历史事件，其中列表/详情自 v0.1 找回并升级 `current_approval_stage` 与双哈希字段）、审批待办全量定义（§3.4 #10，序列图引用自此有实体定义）；恢复旅程 1 序列图（§2.1）与 §3 鉴权总则；SSE Ticket 补限流与重放防护说明（R9 部分）。
 > - v0.3（2026-08-17）：关闭 Review N5、N1、M8-半、LOW；审批请求体补齐 `evidence_snapshot_hash` 实现决策时点双哈希锚定（N5）；审批流程支持分级审批中间态流转（N1）；`POST /runs` 补充版本校验与缺省规则（M8-半）；补充 SSE 鉴权方案说明（短期 Ticket Token，LOW）。
 > - v0.2（2026-08-17）：单事务原子审批时序、返工与取消接口、页面清单。
@@ -355,3 +356,17 @@ sequenceDiagram
   - **限流与重放防护 (R9 部分)**：Ticket 一次性消费（用后即焚）、30s TTL 过期作废、与签发用户+Run 绑定（不可跨 Run 复用）；端点 QPS 限流参数待压测定标（run-model §8 开放问题 3）。
   - **租户上下文裁定 (v0.4.5，Base D 评审 D2)**：非流式端点的租户上下文由 `x-tenant-id` 请求头派生（缺头且无上游注入即 401）；SSE 流端点因 `EventSource` 同样无法携带租户头，**以 Ticket 自身绑定的租户为权威**——存在显式租户上下文时 Ticket 必须与之匹配（失配 401），无上下文时按 Ticket 租户鉴权并以 `getRun(ticket租户, run_id)` 落 404 反探测。
   - **断线重连契约 (F6，待实现)**：Ticket 一次性消费意味着 `EventSource` 原生自动重连会以废票无限 401。Base D 前端已落地 `onerror → close()` 降级（断流显式提示、不自动重连）；正式契约应为**重连前重新出票**（客户端退避后重走 `POST /auth/ticket` 换新票再重建流），服务端语义不变。
+
+### 3.6 审批超时调度器（Base E，v0.4.6）
+
+> 本节定义**系统侧后台组件**的行为契约，不新增 REST 端点。语义源头：run-model §6.3（裁决 5）与模板 spec §3.2（`timeout_policy`）。
+
+- **调度循环**：main-node 进程内定时 tick（默认 60s，`OPERATIONS_TIMEOUT_INTERVAL_MS` 可配；`OPERATIONS_TIMEOUT_SCHEDULER=0` 关停），系统级扫描全部租户的 `awaiting_approval` Run（`listAwaitingApprovalRunsSystem`，仅调度器可用、永不经 BFF 暴露）。
+- **超时锚点**：`runs.updated_at`——进入 `awaiting_approval` 与分级审批 stage 推进均会 CAS 刷新该字段，故**每个 stage 重新计时**。
+- **动作词表**（模板版本 `timeout_policy.escalation_actions[]`，`at_minute` 达阈触发，`run_events` 以 `action=run.escalation` + `payload.dedup_key="<action>:<at_minute>"` 去重——每动作一次机会，发送失败也计已尝试，防通知风暴）：
+  1. `notify_feishu_group`：向 `target`（chat_id）发送飞书互动卡片（`msg_type=interactive`，含工单要素与工作台深链）；
+  2. `notify_process_owner`：P0 仅记审计不投递（无 user↔open_id 目录，债 F7）；
+  3. `mark_approval_overdue_and_cancel`：系统 actor（`system_approval_timeout`）走**与人工取消完全相同的 CAS 路径**（矩阵行 3）迁移至 `cancelled`，`cancel_reason=approval_timeout`，留 `run.cancel` 审计并推送 `run.cancelled` SSE 帧；扫描与动作之间若人工已决策，CAS 冲突被吞——**人工永远赢**。
+- **永不自动批准**：调度器不存在任何 approve 通道（系统级不变量，无配置开关）；未配置取消动作的 Run 超时后仅持续催办、保持 `awaiting_approval`。
+- **SSE 事件**：词表新增 `run.escalation`（payload 含 `action` / `at_minute` / `dedup_key` / `delivered`），随既有 StreamHub 通道下发。
+- **通知出站凭证**：`OPERATIONS_FEISHU_APP_ID` / `OPERATIONS_FEISHU_APP_SECRET`（bootstrap 档）显式配置；未配置时调度器照常取消与审计，卡片诚实降级 `delivered:false`（chat↔App 自动路由为债 E-N1）。

@@ -121,6 +121,14 @@ export class InMemoryOperationsStore implements OperationsStorePort {
     return list.map((r) => ({ ...r }));
   }
 
+  async listAwaitingApprovalRunsSystem(limit: number): Promise<RunRow[]> {
+    const list = Array.from(this.runs.values())
+      .filter((r) => r.state === "awaiting_approval")
+      .sort((a, b) => a.updated_at - b.updated_at)
+      .slice(0, limit);
+    return list.map((r) => ({ ...r }));
+  }
+
   async insertRun(run: RunRow): Promise<void> {
     this.runs.set(this.runKey(run.tenant_id, run.id), { ...run });
   }

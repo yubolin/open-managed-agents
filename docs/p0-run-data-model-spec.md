@@ -1,7 +1,8 @@
-# Operations Run 数据模型 Spec (v0.4.4)
+# Operations Run 数据模型 Spec (v0.4.5)
 
-> 状态：v0.4.4 · **评审定稿**（2026-08-17）
+> 状态：v0.4.5 · **评审定稿**（2026-08-18）
 > 修订记录：
+> - v0.4.5（2026-08-18）：Base E 验收落档——§6.3 超时调度器实现语义定稿：超时锚点=`runs.updated_at`（stage 推进即刷新，**每 stage 重新计时**）；去重键 `<action>:<at_minute>` 以 `run_events(action=run.escalation)` 持久化（每动作一次机会）；§8 新增开放项 6/7/8（"转交"动作词表缺失、`notify_process_owner` 直发目录缺失 F7、`escalation_interval_minutes` 语义与跨 stage 去重粒度）。
 > - v0.4.4（2026-08-17）：Base C 验收落档——§8 行 3 拆分为 **R9a / R9b 诚实记账**：R9a（一次性消费 + 30s TTL + 租户/Run 双向绑定 + 重放/跨租户反探测）随 Base C 收口，票据仓新增 TTL 节流清扫与 FIFO 容量上限（10k）防无界增长；R9b（QPS 限流窗口 + UA 指纹绑定的压测定标）**未实现、保持开放**（代码零限流逻辑，评审 F1 裁定不许改题关门）。
 > - v0.4.3（2026-08-17）：架构对抗性评审落地——新增 **§9「Base B 实现不变量」**（状态 CAS / 审批审计单事务 / Session 终态服务端闭环）；§8 新增开放项 5（`run_artifacts` 大对象 offload 定标）；**D1 触发器策略修订**：Cloudflare 官方文档称 D1 默认强制外键，但仓库 sql-client 适配层留有相反运行时实证（`packages/sql-client/src/adapters/better-sqlite3.ts:150-154`，children-first 安装流成功）——事实无法当场复演，按"两种 regime 下都正确"的支配策略，D1 迁移 `0002_operations_workspace` **同步回填同款 14 只 `trg_fk*` 镜像**（FK=ON 时冗余、FK=OFF 时承重），并以独立测试套件固化（D1 文件 standalone FK=OFF 全量准则）。
 > - v0.4.2（2026-08-17）：实现期勘误（Base A）——`run_events` 复合外键删除动作由 `ON DELETE SET NULL` 改为 **`NO ACTION`**：复合外键的 SET NULL 会将整组引用列（含 `NOT NULL tenant_id`）置空，任何 Run 物理删除将直接违约报错；且 P0 无 Run 删除流程，审计子表引用即阻止删除（对齐 feishu-ops 0002 `trg_fkd` 的 RAISE ABORT 先例，三店语义一致）。`run_id` 可空性与 MATCH SIMPLE 校验规则不变。
@@ -415,6 +416,10 @@ async function verifyExecutionGate(runId: string, tenantId: string, tx: Transact
 | 3b | R9 | 同上——QPS 限流窗口与 UA 指纹绑定 | **未收口（诚实记账，评审 F1）**：代码零限流实现（operations 路由全文无 rate-limit 逻辑）；待压测定标 QPS/窗口参数后落限流中间件与指纹绑定 | ⏳ 开放（压测定标后收口） |
 | 4 | — | SQLite/D1 迁移中 FK=OFF 环境下的 Trigger 镜像 —— **已收口（Base A + v0.4.3 修订，2026-08-17）**：node-sqlite `0006_operations_workspace` 落 14 只 `trg_fk*` 镜像（CASCADE / NO ACTION / MATCH SIMPLE 空值跳过），FK=OFF 套件全绿；**D1 侧经 v0.4.3 支配策略裁定同步回填同款镜像**（`apps/main/migrations/0002_operations_workspace.sql`，事实争议见修订记录——Cloudflare 文档与仓库适配层实证相悖，镜像在两种 regime 下均正确），D1 文件 standalone FK=OFF 测试套件固化；附带勘误 v0.4.2（`run_events` FK 改 NO ACTION） | 已闭环 | ✅ Base A |
 | 5 | 架构评审 | `run_artifacts.content` TEXT 大对象内联风险：Evidence / 执行日志可达 MB 级，威胁 D1 单行/查询内存上限与 SQLite 页分裂（Plan <50KB 内联无虞） | 建议"轻量内联、超限分流"：`plan` 内联；`diagnosis_evidence` / `execution_log` 超 64KB offload 对象存储（R2/S3，`/workspace/.artifacts/<sha256>.blob`），行内 `content` 存摘要/引用，`content_sha256` 始终保留全量哈希（K2 门禁不受影响） | P1 工件服务实现前定标（含 64KB 阈值实测校准） |
+| 6 | Base E | §6.3 允许的三类动作中**"转交"在模板 spec §3.2 `escalation_actions` 无对应 action 值**（词表仅 `notify_feishu_group` / `notify_process_owner` / `mark_approval_overdue_and_cancel`） | Base E 按词表实现三类（两类催办+取消），转交未实现；需模板 spec 先补 action 值定义（如 `reassign_to_group`）及转交对象的 SoD 校验流程，再排期实现 | 模板 spec 升版时定稿 |
+| 7 | Base E | `notify_process_owner` 的直发通道依赖 user↔open_id 目录，当前不存在（债 F7） | Base E 记审计（`delivered:false`）不投递，不伪造送达；目录置备后补投递实现 | 用户目录设计（P1）时收口 |
+| 8 | Base E | `escalation_interval_minutes` 语义未定稿（离散 `at_minute` 点位 vs 周期性重发节流）；且 stage 推进刷新 `updated_at` 后，**已完成动作的去重键不重置**（per-Run 生命周期去重，新 stage 不重发旧动作） | Base E 采用保守读法：仅在 `at_minute` 点位触发一次；去重键 `<action>:<at_minute>` 为 Run 生命周期粒度。若产品要求"每 stage 重新催办"，需把去重粒度改为 `<action>:<at_minute>:<stage>` 并重置计时语义 | 试点反馈后随模板 spec 升版裁定 |
+
 
 ---
 
