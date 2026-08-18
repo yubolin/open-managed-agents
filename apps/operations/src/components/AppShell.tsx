@@ -84,6 +84,7 @@ export function AppShell() {
                 onChange={(e) => handleTenantChange(e.target.value)}
                 className="bg-transparent text-slate-200 font-mono text-xs focus:outline-none cursor-pointer"
               >
+                <option value="tn_3137942b703f4ea903b624e3d1537152" className="bg-slate-900">Bolin's workspace (tn_3137942b...)</option>
                 <option value="tenant_default" className="bg-slate-900">tenant_default</option>
                 <option value="tenant_bayer" className="bg-slate-900">tenant_bayer</option>
                 <option value="tenant_prod" className="bg-slate-900">tenant_prod</option>

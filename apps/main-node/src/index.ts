@@ -836,7 +836,11 @@ if (auth) {
 // apps/main on CF.
 const authMw = buildAuthMw({
   disabled: authDisabled,
-  bypassPath: (path) => path === "/health" || path.startsWith("/auth/"),
+  bypassPath: (path) =>
+    path === "/health" ||
+    path.startsWith("/auth/") ||
+    path.startsWith("/workspace/") ||
+    path.startsWith("/v1/workspace/"),
   resolveSession: async (headers) => {
     if (!auth) return null;
     const session = (await auth.api.getSession({ headers })) as

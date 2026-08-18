@@ -455,7 +455,43 @@ export function operationsRoutes(
 
       // List all runs in awaiting_approval state
       const awaitingRuns = await service.listRuns(tenantId, { state: "awaiting_approval" });
-      return c.json({ pending_runs: awaitingRuns });
+      const approvals = await Promise.all(
+        awaitingRuns.map(async (run) => {
+          let stageName = `Stage ${run.current_approval_stage}`;
+          let groupId = "default";
+          try {
+            const version = await service.getTemplateVersion(tenantId, run.template_version_id);
+            if (version?.approval_policy) {
+              const policy = JSON.parse(version.approval_policy);
+              const stage = policy.stages?.find(
+                (s: any) => s.stage_order === run.current_approval_stage,
+              );
+              if (stage) {
+                stageName = stage.stage_name ?? stageName;
+                groupId = stage.group_id ?? groupId;
+              }
+            }
+          } catch {
+            // fallback defaults
+          }
+
+          return {
+            run_id: run.id,
+            tenant_id: run.tenant_id,
+            title: run.title,
+            created_by: run.created_by,
+            current_approval_stage: run.current_approval_stage,
+            stage_name: stageName,
+            group_id: groupId,
+            plan_hash: run.plan_hash,
+            evidence_snapshot_hash: run.evidence_snapshot_hash,
+            created_at: run.created_at,
+            updated_at: run.updated_at,
+          };
+        }),
+      );
+
+      return c.json({ approvals, pending_runs: awaitingRuns });
     } catch (err) {
       return handleError(c, err);
     }
