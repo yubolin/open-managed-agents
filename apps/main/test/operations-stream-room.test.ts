@@ -212,6 +212,54 @@ describe("OperationsStreamRoom DO · real DO (workerd)", () => {
     await reader2.cancel();
   });
 
+  it("do-7: M-2 backpressure eviction — stalled subscriber is closed and removed at the queue cap", async () => {
+    const runId = `run_backpressure_${Date.now()}`;
+    const tenantId = "tenant_backpressure";
+    const stub = roomNamespace.get(roomNamespace.idFromName(`${tenantId}::${runId}`));
+
+    // Subscribe but NEVER read: the connected frame and every broadcast chunk
+    // pile up in the stream queue (count strategy, HWM=1 → desiredSize = 1 − queue).
+    const streamRes = await stub.fetch("https://operations-stream-room/stream");
+    expect(streamRes.status).toBe(200);
+
+    // Flood past the cap (eviction at desiredSize < −100, i.e. ~102 queued
+    // chunks incl. the connected frame). 110 publishes clears the bar safely.
+    let lastCount = -1;
+    for (let i = 0; i < 110; i++) {
+      const pubRes = await stub.fetch("https://operations-stream-room/publish", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          event: {
+            event_type: "run.step_progress",
+            tenant_id: tenantId,
+            run_id: runId,
+            timestamp: Date.now(),
+            payload: { step: i, total: 110 },
+          } satisfies WorkspaceStreamEvent,
+        }),
+      });
+      const json = (await pubRes.json()) as { subscribers: number };
+      lastCount = json.subscribers;
+    }
+
+    // Evicted mid-flood: the room no longer counts the stalled subscriber.
+    expect(lastCount).toBe(0);
+    const stats = (await (
+      await stub.fetch("https://operations-stream-room/stats")
+    ).json()) as { subscribers: number };
+    expect(stats.subscribers).toBe(0);
+
+    // Eviction CLOSES the stream: buffered chunks drain, then `done` arrives —
+    // which is exactly what flips the client EventSource to onerror → F6 re-ticket.
+    const reader = streamRes.body!.getReader();
+    let done = false;
+    for (let reads = 0; reads < 200 && !done; reads++) {
+      done = (await reader.read()).done;
+    }
+    expect(done).toBe(true);
+  });
+
   it("do-6: hub with waitUntil anchors the DO publish to the event context (H-1)", async () => {
     const runId = `run_waituntil_${Date.now()}`;
     const tenantId = "tenant_waituntil";

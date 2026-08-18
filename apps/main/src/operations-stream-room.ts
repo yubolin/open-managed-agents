@@ -19,7 +19,6 @@ import type { WorkspaceStreamEvent } from "@open-managed-agents/api-types";
 interface Subscriber {
   controller: ReadableStreamDefaultController;
   heartbeatTimer: ReturnType<typeof setInterval>;
-  queuedCount: number;
 }
 
 const MAX_QUEUED_CHUNKS = 100;
@@ -79,33 +78,42 @@ export class OperationsStreamRoom extends DurableObject<Env> {
     return this.subscribers.size;
   }
 
+  /**
+   * Enqueue a chunk to a subscriber, evicting and closing the subscriber if
+   * its internal stream buffer accumulates backpressure beyond MAX_QUEUED_CHUNKS.
+   */
+  private tryEnqueue(sub: Subscriber, chunk: Uint8Array): boolean {
+    try {
+      if (
+        sub.controller.desiredSize === null ||
+        (typeof sub.controller.desiredSize === "number" && sub.controller.desiredSize < -MAX_QUEUED_CHUNKS)
+      ) {
+        clearInterval(sub.heartbeatTimer);
+        this.subscribers.delete(sub);
+        try {
+          sub.controller.close();
+        } catch {
+          // Controller already closed
+        }
+        return false;
+      }
+      sub.controller.enqueue(chunk);
+      return true;
+    } catch {
+      // Stream closed or broken — clean up
+      clearInterval(sub.heartbeatTimer);
+      this.subscribers.delete(sub);
+      return false;
+    }
+  }
+
   /** Internal broadcast loop with slow/dead consumer cleanup */
   private broadcast(event: WorkspaceStreamEvent): number {
     const encoder = new TextEncoder();
     const chunk = encoder.encode(`event: ${event.event_type}\ndata: ${JSON.stringify(event)}\n\n`);
 
     for (const sub of Array.from(this.subscribers)) {
-      try {
-        if (
-          sub.controller.desiredSize === null ||
-          (typeof sub.controller.desiredSize === "number" && sub.controller.desiredSize < -MAX_QUEUED_CHUNKS)
-        ) {
-          clearInterval(sub.heartbeatTimer);
-          this.subscribers.delete(sub);
-          try {
-            sub.controller.close();
-          } catch {
-            // Controller already closed
-          }
-          continue;
-        }
-        sub.controller.enqueue(chunk);
-        sub.queuedCount++;
-      } catch {
-        // Stream closed or broken — clean up
-        clearInterval(sub.heartbeatTimer);
-        this.subscribers.delete(sub);
-      }
+      this.tryEnqueue(sub, chunk);
     }
 
     return this.subscribers.size;
@@ -138,17 +146,14 @@ export class OperationsStreamRoom extends DurableObject<Env> {
           ),
         );
 
-        // 2. 15s keepalive heartbeat
+        // 2. 15s keepalive heartbeat (also subject to backpressure eviction)
         const heartbeatTimer = setInterval(() => {
-          try {
-            controller.enqueue(encoder.encode(`:heartbeat ${Date.now()}\n\n`));
-          } catch {
-            clearInterval(heartbeatTimer);
-            if (subEntry) this.subscribers.delete(subEntry);
+          if (subEntry) {
+            this.tryEnqueue(subEntry, encoder.encode(`:heartbeat ${Date.now()}\n\n`));
           }
         }, 15000);
 
-        subEntry = { controller, heartbeatTimer, queuedCount: 0 };
+        subEntry = { controller, heartbeatTimer };
         this.subscribers.add(subEntry);
       },
       cancel: () => {
