@@ -9,6 +9,7 @@ import {
   Radio,
   FileText,
   AlertTriangle,
+  CheckCircle2,
 } from "lucide-react";
 import { operationsApi } from "../lib/api";
 import { useRunStream } from "../lib/use-run-stream";
@@ -18,7 +19,7 @@ import { StateTimeline } from "../components/StateTimeline";
 import { ApprovalPipeline } from "../components/ApprovalPipeline";
 import { MarkdownViewer } from "../components/MarkdownViewer";
 import { EvidenceViewer } from "../components/EvidenceViewer";
-import { formatDate } from "../lib/utils";
+import { formatDate, shortHash } from "../lib/utils";
 import type { WorkspaceRunState } from "@open-managed-agents/api-types";
 
 export function RunDetailPage() {
@@ -83,6 +84,7 @@ export function RunDetailPage() {
   const artifacts = artifactsData?.artifacts || [];
   const planArtifact = artifacts.find((a) => a.type === "plan");
   const evidenceArtifact = artifacts.find((a) => a.type === "diagnosis_evidence");
+  const executionArtifact = artifacts.find((a) => a.type === "execution_log");
 
   const canSubmit = run.state === "draft";
   const canCancel = ["draft", "submitted", "awaiting_approval"].includes(run.state);
@@ -220,6 +222,24 @@ export function RunDetailPage() {
           <EvidenceViewer content={evidenceArtifact?.content} sha256={evidenceArtifact?.content_sha256} />
         </div>
       </div>
+
+      {/* Execution Report Card if present */}
+      {executionArtifact && (
+        <div className="glass-panel rounded-xl border border-emerald-800/80 bg-emerald-950/20 p-5 space-y-3 glow-emerald">
+          <div className="flex items-center justify-between pb-3 border-b border-emerald-900/60">
+            <h2 className="text-sm font-bold text-emerald-300 flex items-center gap-2">
+              <CheckCircle2 className="w-4 h-4 text-emerald-400" />
+              <span>沙箱自主执行报告与结项审计 (Execution Report)</span>
+            </h2>
+            <span className="text-[11px] font-mono text-emerald-400/80">
+              指纹: {shortHash(executionArtifact.content_sha256)}
+            </span>
+          </div>
+          <pre className="text-xs font-mono bg-slate-950/80 text-emerald-200/90 p-4 rounded-lg border border-slate-800 overflow-x-auto whitespace-pre-wrap">
+            {executionArtifact.content}
+          </pre>
+        </div>
+      )}
 
       {/* Cancel Modal */}
       {isCancelModalOpen && (
