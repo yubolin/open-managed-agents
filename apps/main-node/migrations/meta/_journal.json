@@ -64,6 +64,13 @@
       "when": 1787028123897,
       "tag": "0008_regular_toad",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1787055073663,
+      "tag": "0009_odd_white_tiger",
+      "breakpoints": true
     }
   ]
 }

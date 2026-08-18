@@ -172,6 +172,10 @@ export const runs = sqliteTable(
     evidence_snapshot_hash: text("evidence_snapshot_hash"),
     // Points to the current valid run_approvals row.
     active_approval_id: text("active_approval_id"),
+    // SOFT reference to aiops_alerts.id when the run was triggered from an
+    // alert (K4 bidirectional linkage). No FK by design — separate
+    // aggregates, service-layer validated (p1-aiops-alerts-spec §11 I8).
+    source_alert_id: text("source_alert_id"),
     // JSON: error context for failed / interrupted / cancelled.
     failure_reason: text("failure_reason"),
     created_at: integer("created_at").notNull(),
@@ -190,6 +194,8 @@ export const runs = sqliteTable(
       sql`"state" IN ('draft','submitted','planning','awaiting_approval','approved','rejected','changes_requested','executing','succeeded','failed','interrupted','cancelled','approval_invalidated')`,
     ),
     index("idx_runs_tenant_state").on(t.tenant_id, t.state, t.created_at),
+    // K4 reverse hop: alert detail → runs triggered from that alert.
+    index("idx_runs_tenant_source_alert").on(t.tenant_id, t.source_alert_id),
     index("idx_runs_tenant_creator").on(
       t.tenant_id,
       t.created_by,

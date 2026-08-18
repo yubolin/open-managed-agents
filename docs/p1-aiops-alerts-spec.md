@@ -21,7 +21,7 @@
 ## 2. 存储落位与仓库 Schema 惯例
 
 - **落位**：与 Operations 六表同库同迁移面——main-node（SQLite/PG，`packages/db-schema` + drizzle 快照按 journal idx 命名）、CF 每 shard D1（`wrangler.test.jsonc` migrations 纪律）、PG（`oma-postgres` 双方言实证延续）。
-- **迁移编号**：`0004_aiops_alerts`（0003 为 Operations 六表）。
+- **迁移编号**：各店下一可用 journal idx（实证于 2026-08-18 生成）：D1 `0004_useful_dreaming_celestial`（apps/main/migrations，idx 4）、sqlite `0008_gray_trish_tilby`（apps/main-node/migrations-sqlite，idx 8）、PG `0009_odd_white_tiger`（apps/main-node/migrations，idx 9）。文件名后缀为 drizzle 随机词，稳定锚是 journal idx，快照按 idx 命名；测试以 `0004_*.sql` 前缀解析。
 - **FK=OFF 纪律**：生产 D1 以 FK=OFF 运行，声明式 FK 一律配触发器镜像（对齐 0003 的 17 触发器纪律与 FK=OFF 证明套件）；跨聚合软引用（`source_alert_id` → `aiops_alerts`）**不建 FK、不建镜像**，完整性由服务层校验（裁决见 §11 I8）。
 - **时间戳**：INTEGER ms epoch，与 Operations 表一致。
 - **主键**：TEXT 前缀式（`asrc_` / `alert_` / `aev_` + 随机段），生成于服务层。
@@ -102,7 +102,7 @@ erDiagram
 
 索引：`(tenant_id, alert_id, created_at)`（时间线唯一访问路径）；`(tenant_id, event_type, created_at)`（度量提取）。
 
-**不可变纪律**：无 UPDATE/DELETE 路径；触发器镜像之外追加防改触发器（UPDATE/DELETE → RAISE）与 run_events 同款（对齐 D0 append-only 例外条款：生命周期操作自身留审计）。
+**不可变纪律**：无 UPDATE/DELETE 路径；触发器镜像之外追加防改触发器（UPDATE/DELETE → RAISE）。**此为超越项**：run_events 的 append-only 目前仅是服务层纪律（Base A 迁移只带 FK 镜像触发器，无防改触发器），alert_events 是本域第一个拿到库层强制的审计表（对齐 D0 append-only 例外条款：生命周期操作自身留审计）。
 
 ## 5. 指纹与去重算法
 
@@ -238,9 +238,9 @@ fingerprint = hex(sha256(canonical))
 | I5 | 跨租户负向：token A 的租户无法经任何用户路由看到租户 B 的 source/告警；ingest 的 tenant 一律取自 source 行 |
 | I6 | 过期 tick：stale firing → expired 留审计；幂等重跑零重复；disabled source 的告警照常过期 |
 | I7 | 归一化 golden vectors：AM v2 / generic 各≥3 组（含 resolved、severity 映射、批量）快照断言 |
-| I8 | `source_alert_id`（runs 新增可空列，0004 一并加）与 `correlated_run_id` 为软引用：无 FK；服务层校验存在性与租户一致性；Run 详情可一跳回告警 |
+| I8 | `source_alert_id`（runs 新增可空列，三店 0004/0008/0009 一并加，配 `idx_runs_tenant_source_alert` 反查索引）与 `correlated_run_id` 为软引用：无 FK；服务层校验存在性与租户一致性；Run 详情可一跳回告警 |
 | I9 | trigger-run 不豁免任何既有门：SoD 冲突仍拒、plan_hash 变化仍失效审批、超时仍永不自动批准（复跑既有审批测试面 + alert 上下文断言） |
-| I10 | append-only：UPDATE/DELETE aiops_alert_events 被防改触发器拒绝（FK=OFF 下同款证明） |
+| I10 | append-only：UPDATE/DELETE aiops_alert_events 被防改触发器拒绝（SQLite/D1 `trg_aev_no_update`/`trg_aev_no_delete`，PG plpgsql 同名双触发器；超越 run_events 现状——后者无库层防改） |
 
 ## 12. 开放问题清单（实施期收口，不阻塞评审）
 
