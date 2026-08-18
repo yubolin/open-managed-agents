@@ -99,7 +99,22 @@ export function verifyTicket(
   return { tenantId: entry.tenantId, userId: entry.userId, runId: entry.runId };
 }
 
-export function operationsRoutes(getOperationsService: (c: { env: Env; var: Record<string, unknown> }) => OperationsService) {
+export interface OperationsRoutesOptions {
+  /**
+   * StreamHub instance backing the SSE endpoint (F3/H3: hub DI parameter).
+   * DEFAULT: the in-process globalOperationsStreamHub singleton.
+   * CONTRACT: an injected hub MUST be the same instance wired into the
+   * OperationsService constructor — the service publishes state frames to
+   * ITS hub; a mismatch means SSE subscribers never see them.
+   */
+  hub?: OperationsStreamHubPort;
+}
+
+export function operationsRoutes(
+  getOperationsService: (c: { env: Env; var: Record<string, unknown> }) => OperationsService,
+  opts: OperationsRoutesOptions = {},
+) {
+  const streamHub = opts.hub ?? globalOperationsStreamHub;
   const app = new Hono<{
     Bindings: Env;
     Variables: OperationsVariables;
@@ -503,7 +518,7 @@ export function operationsRoutes(getOperationsService: (c: { env: Env; var: Reco
         );
 
         // Subscribe to StreamHub
-        unsubscribe = globalOperationsStreamHub.subscribe(tenantId, runId, (ev: WorkspaceStreamEvent) => {
+        unsubscribe = streamHub.subscribe(tenantId, runId, (ev: WorkspaceStreamEvent) => {
           try {
             const chunk = `event: ${ev.event_type}\ndata: ${JSON.stringify(ev)}\n\n`;
             controller.enqueue(encoder.encode(chunk));

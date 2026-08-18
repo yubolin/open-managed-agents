@@ -462,3 +462,95 @@ describe("Base D review · D2 production tenant wiring & ticket-authority SSE", 
     expect(res.status).toBe(404);
   });
 });
+
+// ==========================================================================
+// Base F3 first cut · H3: operationsRoutes StreamHub DI (debt F3/H3)
+// ==========================================================================
+
+describe("Base F3 · H3 operationsRoutes hub DI parameterization", () => {
+  it("H3-a: SSE subscription routes through the INJECTED hub, not the global singleton", async () => {
+    const tenantId = "tenant_h3_di";
+    const userId = "user_h3_operator";
+
+    // Self-contained stack: fresh store + service + seeded template.
+    const store = new InMemoryOperationsStore();
+    const service = new OperationsService(store);
+    await store.insertTemplate(
+      {
+        id: "stpl_h3_diag",
+        tenant_id: tenantId,
+        name: "H3 DI Diagnosis",
+        code: "h3_diag",
+        category: "diagnostic",
+        description: "",
+        is_active: 1,
+        current_version_id: "stplv_h3",
+        created_by: "system",
+        created_at: 1000,
+        updated_at: 1000,
+      },
+      {
+        id: "stplv_h3",
+        template_id: "stpl_h3_diag",
+        tenant_id: tenantId,
+        version: 1,
+        is_active: 1,
+        agent_binding: JSON.stringify({ agent_id: "agent_h3", version: 1 }),
+        form_schema: JSON.stringify({ type: "object" }),
+        ui_schema: null,
+        approval_policy: JSON.stringify({
+          mode: "sequential_groups",
+          stages: [{ stage_order: 1, stage_name: "Lead", group_id: "grp_lead", required_approvals: 1 }],
+        }),
+        timeout_policy: JSON.stringify({ approval_timeout_minutes: 30 }),
+        changelog: "v1",
+        published_by: "system",
+        published_at: 1000,
+      }
+    );
+
+    const subscribeCalls: Array<{ tenantId: string; runId: string }> = [];
+    const injectedHub = {
+      publish: (_t: string, _r: string, _e: unknown) => {},
+      subscribe: (t: string, r: string) => {
+        subscribeCalls.push({ tenantId: t, runId: r });
+        return () => {};
+      },
+    };
+
+    // Separate app whose ONLY difference is the injected hub.
+    const diRoot = new Hono();
+    diRoot.use("*", async (c, next) => {
+      c.set("tenant_id" as any, tenantId);
+      c.set("user_id" as any, userId);
+      await next();
+    });
+    diRoot.route("/v1/workspace", operationsRoutes(() => service, { hub: injectedHub as any }));
+
+    const run = await service.createRun({
+      tenantId,
+      templateId: "stpl_h3_diag",
+      title: "H3 DI hub test",
+      inputParameters: {},
+      actor: { type: "user", id: userId },
+      autoSubmit: false,
+    });
+
+    const ticketRes = await diRoot.request("http://localhost/v1/workspace/auth/ticket", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ run_id: run.id }),
+    });
+    const { ticket } = await ticketRes.json<{ ticket: string }>();
+
+    const sseRes = await diRoot.request(
+      `http://localhost/v1/workspace/runs/${run.id}/events/stream?token=${ticket}`
+    );
+    expect(sseRes.status).toBe(200);
+
+    // The subscription landed on the injected instance with correct binding —
+    // the route is no longer hardwired to globalOperationsStreamHub.
+    expect(subscribeCalls).toHaveLength(1);
+    expect(subscribeCalls[0]).toEqual({ tenantId, runId: run.id });
+  });
+});
