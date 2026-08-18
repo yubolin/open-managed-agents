@@ -1,7 +1,8 @@
 # Operations Workspace BFF API 规范与架构图 (v0.4)
 
-> 状态：v0.4 · **评审定稿**（2026-08-17）
+> 状态：v0.4.9 · **评审定稿**（2026-08-18）
 > 修订记录：
+> - v0.4.9（2026-08-18）：断线重连契约与 DO 背压闭环（§3.5 增补）——前端 `useRunStream` 落地 F6 重连契约：`onerror` 立即关闭废弃流，指数退避（1s~15s + jitter）重新调 `POST /auth/ticket` 换取新票并建新流，重连成功后全量失效 React Query 缓存追平 REST SoT；`OperationsStreamRoom` 落地 M-2 慢消费者背压队列上限（100 帧超限逐出）与首帧 `run_id` 标定。
 > - v0.4.8（2026-08-18）：F3 Phase 2 + P3-③ CF/D1 边缘架构对齐（§3.5 增补）——D1 Ticket 真源按请求解析（`c.var.tenantDb`）、`OperationsStreamRoom` DO 单点广播锚（`idFromName(tenant::run)`）、stream GET 豁免上游鉴权（Ticket 即权威，出票口仍全鉴权）、DO 发布以 `waitUntil` 锚定请求上下文；审批超时调度器抽取共享 tick 并注册 CF Cron（`OPERATIONS_TIMEOUT_CRON` 可配），跨 shard 扫描、旧 shard 软跳过。
 > - v0.4.7（2026-08-18）：F3 Phase 1 跨副本契约增补（§3.5）——SSE Ticket 落库 `sse_tickets` 共享真源（DELETE RETURNING 原子单次消费）、PG LISTEN/NOTIFY 跨副本事件扇出（`oma_operations_events` 单通道 + origin-id 回声过滤）、通知层语义（无补帧）与超限帧本地降级；新增 `OPERATIONS_PG_SSE_HUB` 开关。
 > - v0.4.6（2026-08-18）：新增 §3.6 审批超时调度器（Base E）——超时升级动作语义、`run.escalation` SSE 事件类型、系统取消审计与部署开关；不改变任何既有端点契约。
@@ -357,7 +358,8 @@ sequenceDiagram
   - 针对原生浏览器 `EventSource` 无法携带自定义 `Authorization` Header 的问题，前端先调用 `POST /v1/workspace/auth/ticket` 换取有效期 30 秒的**一次性** Ticket，随后在 SSE URL 查询参数中携带 `?token=<ticket>`，BFF 网关校验 Ticket 后建立长连接；
   - **限流与重放防护 (R9 部分)**：Ticket 一次性消费（用后即焚）、30s TTL 过期作废、与签发用户+Run 绑定（不可跨 Run 复用）；端点 QPS 限流参数待压测定标（run-model §8 开放问题 3）。
   - **租户上下文裁定 (v0.4.5，Base D 评审 D2)**：非流式端点的租户上下文由 `x-tenant-id` 请求头派生（缺头且无上游注入即 401）；SSE 流端点因 `EventSource` 同样无法携带租户头，**以 Ticket 自身绑定的租户为权威**——存在显式租户上下文时 Ticket 必须与之匹配（失配 401），无上下文时按 Ticket 租户鉴权并以 `getRun(ticket租户, run_id)` 落 404 反探测。
-  - **断线重连契约 (F6，待实现)**：Ticket 一次性消费意味着 `EventSource` 原生自动重连会以废票无限 401。Base D 前端已落地 `onerror → close()` 降级（断流显式提示、不自动重连）；正式契约应为**重连前重新出票**（客户端退避后重走 `POST /auth/ticket` 换新票再重建流），服务端语义不变。
+  - **断线重连契约 (F6，已闭环 v0.4.9)**：Ticket 一次性消费意味着 `EventSource` 原生自动重连会以废票无限 401。前端 `useRunStream` 落地 `onerror` 立即关闭废弃流 + 指数退避（1s -> 2s -> 4s -> 8s -> 15s + jitter）；重连前调用 `POST /auth/ticket` 换取全新单次有效 Ticket 再建新流；重连成功时触发全量 React Query 缓存失效（`workspace.run`, `workspace.runs`, `workspace.artifacts`, `workspace.approvals`），从 REST SoT 追平掉线期间状态。
+  - **DO 慢消费者背压与首帧标定 (M-2，v0.4.9)**：`OperationsStreamRoom` 对积压超过 100 帧或 `desiredSize === null` 的慢/异常订阅者自动逐出并关闭，杜绝内存泄漏；首帧 `event: connected` 携带 `run_id` 与 `tenant_id`。
   - **跨副本契约 (F3 Phase 1，v0.4.7)**：多副本部署下三重门的内存 Map 真源失效（副本 A 出票、副本 B 校验永 401）。裁定：
     - **Ticket 落库共享真源**：`POST /auth/ticket` 签发即写 `sse_tickets` 表（token 主键 / tenant / user / run 可空 / expires_at），消费即 `DELETE ... RETURNING` —— 数据库原子性保证跨副本单次消费（两副本竞抢恰好一个赢家），SQLite / D1 / PG 三方言同语义；`main-node` 两种方言统一注入 DB-backed store，SQLite 单进程模式行为与内存版逐位等价。过期清扫为机会主义（签发路径节流触发 + 仅回收未兑换票）。
     - **PG LISTEN/NOTIFY 事件扇出**：PG 模式下 OperationsStreamHub 换装 `PgOperationsStreamHub`——单通道 `oma_operations_events`，本地扇出先行、NOTIFY 跨副本广播，payload 携带发布方随机 origin-id 做**回声过滤**（PG 会把 NOTIFY 回声给发布者，本地已扇出过，必须丢弃）。经 H3 注入缝接线：service 与 BFF 必须共享同一 hub 实例。开关 `OPERATIONS_PG_SSE_HUB=0` 可熔断回退单进程内存扇出（默认开启）。

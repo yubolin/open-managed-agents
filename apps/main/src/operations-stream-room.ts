@@ -19,7 +19,10 @@ import type { WorkspaceStreamEvent } from "@open-managed-agents/api-types";
 interface Subscriber {
   controller: ReadableStreamDefaultController;
   heartbeatTimer: ReturnType<typeof setInterval>;
+  queuedCount: number;
 }
+
+const MAX_QUEUED_CHUNKS = 100;
 
 export class OperationsStreamRoom extends DurableObject<Env> {
   private subscribers = new Set<Subscriber>();
@@ -83,12 +86,21 @@ export class OperationsStreamRoom extends DurableObject<Env> {
 
     for (const sub of Array.from(this.subscribers)) {
       try {
-        if (sub.controller.desiredSize === null) {
+        if (
+          sub.controller.desiredSize === null ||
+          (typeof sub.controller.desiredSize === "number" && sub.controller.desiredSize < -MAX_QUEUED_CHUNKS)
+        ) {
           clearInterval(sub.heartbeatTimer);
           this.subscribers.delete(sub);
+          try {
+            sub.controller.close();
+          } catch {
+            // Controller already closed
+          }
           continue;
         }
         sub.controller.enqueue(chunk);
+        sub.queuedCount++;
       } catch {
         // Stream closed or broken — clean up
         clearInterval(sub.heartbeatTimer);
@@ -101,6 +113,8 @@ export class OperationsStreamRoom extends DurableObject<Env> {
 
   private handleStream(request: Request): Response {
     const encoder = new TextEncoder();
+    const tenantId = request.headers.get("x-tenant-id") ?? undefined;
+    const runId = request.headers.get("x-run-id") ?? undefined;
     let subEntry: Subscriber | null = null;
 
     request.signal.addEventListener("abort", () => {
@@ -112,10 +126,15 @@ export class OperationsStreamRoom extends DurableObject<Env> {
 
     const stream = new ReadableStream({
       start: (controller) => {
-        // 1. Initial connected event frame
+        // 1. Initial connected event frame (with run_id / tenant_id if provided)
         controller.enqueue(
           encoder.encode(
-            `event: connected\ndata: ${JSON.stringify({ status: "connected", ts: Date.now() })}\n\n`,
+            `event: connected\ndata: ${JSON.stringify({
+              status: "connected",
+              ...(runId ? { run_id: runId } : {}),
+              ...(tenantId ? { tenant_id: tenantId } : {}),
+              ts: Date.now(),
+            })}\n\n`,
           ),
         );
 
@@ -129,7 +148,7 @@ export class OperationsStreamRoom extends DurableObject<Env> {
           }
         }, 15000);
 
-        subEntry = { controller, heartbeatTimer };
+        subEntry = { controller, heartbeatTimer, queuedCount: 0 };
         this.subscribers.add(subEntry);
       },
       cancel: () => {

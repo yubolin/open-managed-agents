@@ -32,6 +32,20 @@ describe("OperationsStreamRoom DO · real DO (workerd)", () => {
     expect(chunk).toContain('"status":"connected"');
 
     await reader.cancel();
+
+    // With explicit x-run-id / x-tenant-id headers
+    const resWithHeaders = await stub.fetch("https://operations-stream-room/stream", {
+      headers: {
+        "x-run-id": runId,
+        "x-tenant-id": tenantId,
+      },
+    });
+    const readerWithHeaders = resWithHeaders.body!.getReader();
+    const { value: valH } = await readerWithHeaders.read();
+    const chunkH = decoder.decode(valH);
+    expect(chunkH).toContain(`"run_id":"${runId}"`);
+    expect(chunkH).toContain(`"tenant_id":"${tenantId}"`);
+    await readerWithHeaders.cancel();
   });
 
   it("do-2: publish endpoint broadcasts frames to active SSE subscriber", async () => {
