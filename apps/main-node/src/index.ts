@@ -86,7 +86,7 @@ import {
   mintApiKeyOnStorage,
   sha256Hex,
 } from "@open-managed-agents/http-routes";
-import { createOperationsService } from "@open-managed-agents/operations-store";
+import { createOperationsService, DrizzleSseTicketStore } from "@open-managed-agents/operations-store";
 import {
   buildNodeRepos,
   SqlFeishuInstallationRepo,
@@ -137,6 +137,7 @@ import {
   type EventStreamHub,
 } from "./lib/event-stream-hub";
 import { PgEventStreamHub } from "./lib/pg-event-stream-hub";
+import { PgOperationsStreamHub } from "./lib/pg-operations-stream-hub";
 import { NodeHarnessRuntime } from "./lib/node-harness-runtime";
 import { resolveNodeAuxModel } from "./lib/node-aux-model.js";
 import { SessionRegistry } from "./registry.js";
@@ -1320,8 +1321,30 @@ app.route("/v1/oma/evals", buildEvalRoutes({
   agents: agentsService,
 }));
 
-const operationsService = createOperationsService(drizzleDb);
-app.route("/v1/workspace", operationsRoutes(() => operationsService));
+// F3 Phase 1 · cross-replica operations fanout + shared ticket truth.
+// PG branch: LISTEN/NOTIFY hub (kill-switch OPERATIONS_PG_SSE_HUB=0) rides
+// the H3 DI seam — the SAME instance backs the service constructor and the
+// BFF SSE endpoint (mismatch = subscribers never see frames, per the H3
+// contract). SQLite branch keeps the in-process singleton (single process).
+// The ticket store is DB-backed on BOTH branches: consume-as-DELETE gives
+// atomic single-use, and replicas share one truth wherever the DB is shared.
+let operationsPgHub: PgOperationsStreamHub | null = null;
+if (usePostgres && process.env.OPERATIONS_PG_SSE_HUB !== "0") {
+  operationsPgHub = await PgOperationsStreamHub.create({ dsn: dbUrl });
+  logger.info({ op: "main-node.boot.pg_operations_hub", channel: "oma_operations_events" }, "operations SSE fanout via PG LISTEN/NOTIFY");
+}
+const operationsService = createOperationsService(
+  drizzleDb,
+  operationsPgHub ? { hub: operationsPgHub } : {},
+);
+const operationsTicketStore = new DrizzleSseTicketStore(drizzleDb);
+app.route(
+  "/v1/workspace",
+  operationsRoutes(() => operationsService, {
+    ...(operationsPgHub ? { hub: operationsPgHub } : {}),
+    ticketStore: operationsTicketStore,
+  }),
+);
 
 // Base E · approval timeout scheduler (run-model spec §6.3 裁决 5). In-process
 // tick loop over awaiting_approval runs; fires template escalation_actions
@@ -1509,6 +1532,9 @@ const shutdown = async (signal: string) => {
   }
   if (hub instanceof PgEventStreamHub) {
     try { await hub.stop(); } catch (err) { logger.warn({ err, op: "main-node.shutdown.pg_hub_stop_failed" }, "pg-hub stop failed"); }
+  }
+  if (operationsPgHub) {
+    try { await operationsPgHub.stop(); } catch (err) { logger.warn({ err, op: "main-node.shutdown.pg_operations_hub_stop_failed" }, "operations pg-hub stop failed"); }
   }
   if (authShutdown) {
     try { await authShutdown(); } catch (err) { logger.warn({ err, op: "main-node.shutdown.auth_failed" }, "auth shutdown failed"); }

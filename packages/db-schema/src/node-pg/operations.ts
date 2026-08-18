@@ -20,6 +20,23 @@ import {
   unique,
 } from "drizzle-orm/pg-core";
 
+// sse_tickets (Base F3) ------------------------------------------------------
+// BFF auth infra for the SSE triple-gate — NOT operations domain data.
+// PG-typed mirror of cf-auth/operations.ts sse_tickets; see that file for
+// the cross-replica single-use rationale. No FK by design.
+export const sse_tickets = pgTable(
+  "sse_tickets",
+  {
+    token: text("token").primaryKey().notNull(),
+    tenant_id: text("tenant_id").notNull(),
+    user_id: text("user_id").notNull(),
+    run_id: text("run_id"),
+    expires_at: bigint("expires_at", { mode: "number" }).notNull(),
+    created_at: bigint("created_at", { mode: "number" }).notNull(),
+  },
+  (t) => [index("idx_sse_tickets_expires").on(t.expires_at)],
+);
+
 // service_templates ---------------------------------------------------------
 export const service_templates = pgTable(
   "service_templates",

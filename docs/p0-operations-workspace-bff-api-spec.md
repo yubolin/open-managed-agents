@@ -2,6 +2,7 @@
 
 > 状态：v0.4 · **评审定稿**（2026-08-17）
 > 修订记录：
+> - v0.4.7（2026-08-18）：F3 Phase 1 跨副本契约增补（§3.5）——SSE Ticket 落库 `sse_tickets` 共享真源（DELETE RETURNING 原子单次消费）、PG LISTEN/NOTIFY 跨副本事件扇出（`oma_operations_events` 单通道 + origin-id 回声过滤）、通知层语义（无补帧）与超限帧本地降级；新增 `OPERATIONS_PG_SSE_HUB` 开关。
 > - v0.4.6（2026-08-18）：新增 §3.6 审批超时调度器（Base E）——超时升级动作语义、`run.escalation` SSE 事件类型、系统取消审计与部署开关；不改变任何既有端点契约。
 > - v0.4（2026-08-17）：闭合 Review R0——API 契约面自 7 个端点找回补全至 **13 个**：恢复服务目录接口（§3.1 #1/#2）、Run 查询与回看接口（§3.3 #7 列表 / #8 详情 / #9 历史事件，其中列表/详情自 v0.1 找回并升级 `current_approval_stage` 与双哈希字段）、审批待办全量定义（§3.4 #10，序列图引用自此有实体定义）；恢复旅程 1 序列图（§2.1）与 §3 鉴权总则；SSE Ticket 补限流与重放防护说明（R9 部分）。
 > - v0.3（2026-08-17）：关闭 Review N5、N1、M8-半、LOW；审批请求体补齐 `evidence_snapshot_hash` 实现决策时点双哈希锚定（N5）；审批流程支持分级审批中间态流转（N1）；`POST /runs` 补充版本校验与缺省规则（M8-半）；补充 SSE 鉴权方案说明（短期 Ticket Token，LOW）。
@@ -356,6 +357,11 @@ sequenceDiagram
   - **限流与重放防护 (R9 部分)**：Ticket 一次性消费（用后即焚）、30s TTL 过期作废、与签发用户+Run 绑定（不可跨 Run 复用）；端点 QPS 限流参数待压测定标（run-model §8 开放问题 3）。
   - **租户上下文裁定 (v0.4.5，Base D 评审 D2)**：非流式端点的租户上下文由 `x-tenant-id` 请求头派生（缺头且无上游注入即 401）；SSE 流端点因 `EventSource` 同样无法携带租户头，**以 Ticket 自身绑定的租户为权威**——存在显式租户上下文时 Ticket 必须与之匹配（失配 401），无上下文时按 Ticket 租户鉴权并以 `getRun(ticket租户, run_id)` 落 404 反探测。
   - **断线重连契约 (F6，待实现)**：Ticket 一次性消费意味着 `EventSource` 原生自动重连会以废票无限 401。Base D 前端已落地 `onerror → close()` 降级（断流显式提示、不自动重连）；正式契约应为**重连前重新出票**（客户端退避后重走 `POST /auth/ticket` 换新票再重建流），服务端语义不变。
+  - **跨副本契约 (F3 Phase 1，v0.4.7)**：多副本部署下三重门的内存 Map 真源失效（副本 A 出票、副本 B 校验永 401）。裁定：
+    - **Ticket 落库共享真源**：`POST /auth/ticket` 签发即写 `sse_tickets` 表（token 主键 / tenant / user / run 可空 / expires_at），消费即 `DELETE ... RETURNING` —— 数据库原子性保证跨副本单次消费（两副本竞抢恰好一个赢家），SQLite / D1 / PG 三方言同语义；`main-node` 两种方言统一注入 DB-backed store，SQLite 单进程模式行为与内存版逐位等价。过期清扫为机会主义（签发路径节流触发 + 仅回收未兑换票）。
+    - **PG LISTEN/NOTIFY 事件扇出**：PG 模式下 OperationsStreamHub 换装 `PgOperationsStreamHub`——单通道 `oma_operations_events`，本地扇出先行、NOTIFY 跨副本广播，payload 携带发布方随机 origin-id 做**回声过滤**（PG 会把 NOTIFY 回声给发布者，本地已扇出过，必须丢弃）。经 H3 注入缝接线：service 与 BFF 必须共享同一 hub 实例。开关 `OPERATIONS_PG_SSE_HUB=0` 可熔断回退单进程内存扇出（默认开启）。
+    - **通知层语义（无补帧）**：operations 流**不做** gap recovery（区别于会话流的 seq 水位线）——SSE 是通知层而非事实源，事实源是 DB + REST（`GET /runs/:id`）；LISTEN 掉线窗口丢帧即丢，F6 重连换票是恢复路径。
+    - **超限帧本地降级**：PG NOTIFY payload 上限 8000 字节；超 7.5KB 的帧本地扇出 + warn、**不跨副本 NOTIFY**（其他副本缺该帧，同通知层语义）。
 
 ### 3.6 审批超时调度器（Base E，v0.4.6）
 

@@ -6,6 +6,7 @@ import {
   type AuditActor,
   type OperationsService,
   type OperationsStreamHubPort,
+  type SseTicketStorePort,
 } from "@open-managed-agents/operations-store";
 import type { WorkspaceStreamEvent } from "@open-managed-agents/api-types";
 
@@ -47,6 +48,14 @@ export function sseTicketStoreStats(): { size: number } {
   return { size: sseTicketStore.size };
 }
 
+function mintTokenHex(): string {
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes)
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
 export function generateTicket(tenantId: string, userId: string, runId?: string): string {
   const now = Date.now();
   sweepExpiredTickets(now);
@@ -58,11 +67,7 @@ export function generateTicket(tenantId: string, userId: string, runId?: string)
       sseTicketStore.delete(oldest);
     }
   }
-  const bytes = new Uint8Array(16);
-  crypto.getRandomValues(bytes);
-  const ticket = Array.from(bytes)
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
+  const ticket = mintTokenHex();
   sseTicketStore.set(ticket, {
     tenantId,
     userId,
@@ -99,6 +104,26 @@ export function verifyTicket(
   return { tenantId: entry.tenantId, userId: entry.userId, runId: entry.runId };
 }
 
+/**
+ * Shared-store variant of verifyTicket (F3): consume atomically from the
+ * injected SseTicketStorePort, then apply the same TTL / tenant
+ * anti-probing / run-binding checks. Consume-before-check is deliberate —
+ * an expired or mismatched ticket is still spent, exactly like the
+ * in-process Map path (verifyTicket deletes before checking).
+ */
+async function consumeFromStore(
+  store: SseTicketStorePort,
+  token: string,
+  opts?: { expectedTenantId?: string; expectedRunId?: string },
+): Promise<{ tenantId: string; userId: string; runId?: string } | null> {
+  const entry = await store.consume(token);
+  if (!entry) return null;
+  if (Date.now() > entry.expiresAt) return null;
+  if (opts?.expectedTenantId && entry.tenantId !== opts.expectedTenantId) return null;
+  if (opts?.expectedRunId && entry.runId && entry.runId !== opts.expectedRunId) return null;
+  return { tenantId: entry.tenantId, userId: entry.userId, runId: entry.runId };
+}
+
 export interface OperationsRoutesOptions {
   /**
    * StreamHub instance backing the SSE endpoint (F3/H3: hub DI parameter).
@@ -108,6 +133,14 @@ export interface OperationsRoutesOptions {
    * ITS hub; a mismatch means SSE subscribers never see them.
    */
   hub?: OperationsStreamHubPort;
+  /**
+   * Shared ticket truth for the SSE triple-gate (F3). DEFAULT: the
+   * in-process module Map (single-process semantics). Multi-replica
+   * deployments MUST inject a store backed by shared storage (e.g.
+   * DrizzleSseTicketStore on the same DB as the service) — otherwise a
+   * ticket minted on replica A is rejected by replica B.
+   */
+  ticketStore?: SseTicketStorePort;
 }
 
 export function operationsRoutes(
@@ -115,6 +148,7 @@ export function operationsRoutes(
   opts: OperationsRoutesOptions = {},
 ) {
   const streamHub = opts.hub ?? globalOperationsStreamHub;
+  const ticketStore = opts.ticketStore ?? null;
   const app = new Hono<{
     Bindings: Env;
     Variables: OperationsVariables;
@@ -468,6 +502,19 @@ export function operationsRoutes(
       } catch {
         // No body provided
       }
+      if (ticketStore) {
+        // Shared-truth path (F3): mint locally, persist to the injected
+        // store so ANY replica can consume it.
+        const ticket = mintTokenHex();
+        await ticketStore.issue({
+          token: ticket,
+          tenantId,
+          userId,
+          runId,
+          expiresAt: Date.now() + SSE_TICKET_TTL_MS,
+        });
+        return c.json({ ticket, expires_in_seconds: 30 });
+      }
       const ticket = generateTicket(tenantId, userId, runId);
       return c.json({
         ticket,
@@ -491,7 +538,14 @@ export function operationsRoutes(
     // When an explicit tenant context exists (header/injected), the ticket
     // must match it. When it does not (browser EventSource cannot send
     // headers), the ticket's own tenant binding is the authority.
-    const verified = verifyTicket(token, { expectedTenantId: tenantId || undefined, expectedRunId: runId });
+    // Injected store (F3): consume from the shared truth — atomic
+    // single-use across replicas. Default: the in-process Map.
+    const verified = ticketStore
+      ? await consumeFromStore(ticketStore, token, {
+          expectedTenantId: tenantId || undefined,
+          expectedRunId: runId,
+        })
+      : verifyTicket(token, { expectedTenantId: tenantId || undefined, expectedRunId: runId });
     if (!verified) {
       return c.json({ error: "Unauthorized: Invalid or expired ticket", code: "UNAUTHORIZED" }, 401);
     }

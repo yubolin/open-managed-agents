@@ -56,6 +56,27 @@ import {
   unique,
 } from "drizzle-orm/sqlite-core";
 
+// sse_tickets (Base F3) ------------------------------------------------------
+// BFF auth infra for the SSE triple-gate — NOT operations domain data. Lives
+// in the consolidated baseline so multi-replica deployments share one ticket
+// truth: replica A mints, replica B consumes. Single-use is enforced by
+// consume-as-DELETE-RETURNING (atomic on SQLite/D1/PG alike). No FK: tickets
+// are minted before any run binding exists and are transport auth, not
+// domain state (SoT for runs is the runs table, never this).
+export const sse_tickets = sqliteTable(
+  "sse_tickets",
+  {
+    token: text("token").primaryKey().notNull(),
+    tenant_id: text("tenant_id").notNull(),
+    user_id: text("user_id").notNull(),
+    // Nullable: run-less tickets are legal (stream-listing future use).
+    run_id: text("run_id"),
+    expires_at: integer("expires_at").notNull(),
+    created_at: integer("created_at").notNull(),
+  },
+  (t) => [index("idx_sse_tickets_expires").on(t.expires_at)],
+);
+
 // service_templates ---------------------------------------------------------
 export const service_templates = sqliteTable(
   "service_templates",
