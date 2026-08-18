@@ -12,6 +12,7 @@ import {
   mintApiKeyOnStorage,
   operationsRoutes,
 } from "@open-managed-agents/http-routes";
+import { createCfSseTicketStore } from "@open-managed-agents/operations-store";
 import type { Services } from "@open-managed-agents/services";
 import {
   createCfShardPoolService,
@@ -390,7 +391,17 @@ app.route("/v1/tenants", tenantsRoutes);
 app.route("/v1/evals", evalsRoutes);
 app.route("/v1/cost_report", costReportRoutes);
 app.route("/v1/integrations", integrationsRoutes);
-app.route("/v1/workspace", operationsRoutes((c) => (c.var as { services: Services }).services.operations));
+// F3 P2-①: SSE ticket truth on D1. The per-tenant D1 binding flows through
+// c.var (there is no DB at mount time), so the ticketStore is a per-request
+// RESOLVER. It rides the same physical D1 as services.operations — any
+// isolate minting and any isolate consuming see one atomic single-use truth
+// (DELETE ... RETURNING), killing the cross-isolate 401 loop.
+app.route(
+  "/v1/workspace",
+  operationsRoutes((c) => (c.var as { services: Services }).services.operations, {
+    ticketStore: (c) => createCfSseTicketStore((c as AppCtx).var.tenantDb),
+  }),
+);
 app.route("/v1/runtimes", runtimesRoutes);
 app.route("/v1/stats", statsRoutes);
 

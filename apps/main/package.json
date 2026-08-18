@@ -26,6 +26,7 @@
     "@open-managed-agents/memory-store": "workspace:*",
     "@open-managed-agents/model-cards-store": "workspace:*",
     "@open-managed-agents/observability": "workspace:*",
+    "@open-managed-agents/operations-store": "workspace:*",
     "@open-managed-agents/outbound-snapshots-store": "workspace:*",
     "@open-managed-agents/queue": "workspace:*",
     "@open-managed-agents/scheduler": "workspace:*",

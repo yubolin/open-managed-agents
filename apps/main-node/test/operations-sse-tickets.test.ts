@@ -1,12 +1,14 @@
-// SSE ticket store (Base F3 Phase 1) — shared-truth single-use tickets.
+// SSE ticket store (Base F3) — shared-truth single-use tickets.
 //
-// Three suites:
+// Suites:
 //   1. ALWAYS-ON sqlite: dual DrizzleSseTicketStore instances over the SAME
 //      on-disk file (two independent connections = two "replicas") prove
 //      cross-process mint/consume mutual recognition and atomic single-use.
 //   2. ALWAYS-ON route level: operationsRoutes with an injected ticketStore
 //      — POST /auth/ticket mints into the shared store, GET stream consumes
 //      from it; second stream connect is 401 (single-use at the HTTP gate).
+//   2b. Resolver-form injection (F3 P2-①): the per-request seam apps/main
+//      uses on CF D1 — resolver truth shared, resolver null → Map fallback.
 //   3. PG-gated (PG_TEST_URL): the drizzle adapter over real Postgres —
 //      including the bigint→string coercion defense (Number() at the row
 //      mapping boundary).
@@ -188,6 +190,135 @@ describe("SseTicketStore · route-level injection (operationsRoutes)", () => {
         `http://localhost/v1/workspace/runs/${run.id}/events/stream?token=${ticket}`,
       );
       expect(sseRes.status).toBe(401);
+    } finally {
+      cleanup();
+    }
+  });
+});
+
+// ──────────────────────────────────────────────────────────────────────
+// 2b. Resolver-form ticketStore (F3 P2-①) — the CF seam: per-request
+// resolution, instance semantics unchanged, null → in-process fallback.
+// ──────────────────────────────────────────────────────────────────────
+
+describe("SseTicketStore · resolver-form injection (operationsRoutes)", () => {
+  it("t5: resolver-returned store is the shared truth — other replica sees the mint", async () => {
+    const { dbA, path, cleanup } = openDualSqliteDb();
+    try {
+      const tenantId = "tenant_f3_resolver";
+      const ticketStore = new DrizzleSseTicketStore(dbA);
+      const store = new InMemoryOperationsStore();
+      const service = new OperationsService(store);
+      await store.insertTemplate(
+        {
+          id: "stpl_f3r", tenant_id: tenantId, name: "F3r", code: "f3r",
+          category: "diagnostic", description: "", is_active: 1,
+          current_version_id: "stplv_f3r", created_by: "system",
+          created_at: 1, updated_at: 1,
+        },
+        {
+          id: "stplv_f3r", template_id: "stpl_f3r", tenant_id: tenantId,
+          version: 1, is_active: 1, agent_binding: "{}",
+          form_schema: "{}", ui_schema: null, approval_policy: "{}",
+          timeout_policy: "{}", changelog: "", published_by: "system",
+          published_at: 1,
+        },
+      );
+      const run = await service.createRun({
+        tenantId, templateId: "stpl_f3r", title: "F3 resolver",
+        inputParameters: {}, actor: { type: "user", id: "user_op" },
+        autoSubmit: false,
+      });
+
+      const root = new Hono();
+      root.use("*", async (c, next) => {
+        c.set("tenant_id" as any, tenantId);
+        c.set("user_id" as any, "user_op");
+        await next();
+      });
+      root.route(
+        "/v1/workspace",
+        // RESOLVER form — what apps/main passes (per-request D1).
+        operationsRoutes(() => service, { ticketStore: () => ticketStore }),
+      );
+
+      const mintRes = await root.request("http://localhost/v1/workspace/auth/ticket", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ run_id: run.id }),
+      });
+      expect(mintRes.status).toBe(200);
+      const { ticket } = await mintRes.json<{ ticket: string }>();
+
+      // Shared truth through the resolver path: the OTHER replica
+      // (independent connection, same file) consumes it exclusively.
+      const otherReplica = new DrizzleSseTicketStore(openExtraConnection(path));
+      expect(await otherReplica.consume(ticket)).toMatchObject({ tenantId, runId: run.id });
+      // Spent — even the minting route must now 401.
+      const sseRes = await root.request(
+        `http://localhost/v1/workspace/runs/${run.id}/events/stream?token=${ticket}`,
+      );
+      expect(sseRes.status).toBe(401);
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("t6: resolver declining (null) falls back to the in-process Map", async () => {
+    const { dbA, cleanup } = openDualSqliteDb();
+    try {
+      const tenantId = "tenant_f3_fallback";
+      const ticketStore = new DrizzleSseTicketStore(dbA);
+      const store = new InMemoryOperationsStore();
+      const service = new OperationsService(store);
+      await store.insertTemplate(
+        {
+          id: "stpl_f3f", tenant_id: tenantId, name: "F3f", code: "f3f",
+          category: "diagnostic", description: "", is_active: 1,
+          current_version_id: "stplv_f3f", created_by: "system",
+          created_at: 1, updated_at: 1,
+        },
+        {
+          id: "stplv_f3f", template_id: "stpl_f3f", tenant_id: tenantId,
+          version: 1, is_active: 1, agent_binding: "{}",
+          form_schema: "{}", ui_schema: null, approval_policy: "{}",
+          timeout_policy: "{}", changelog: "", published_by: "system",
+          published_at: 1,
+        },
+      );
+      const run = await service.createRun({
+        tenantId, templateId: "stpl_f3f", title: "F3 fallback",
+        inputParameters: {}, actor: { type: "user", id: "user_op" },
+        autoSubmit: false,
+      });
+
+      const root = new Hono();
+      root.use("*", async (c, next) => {
+        c.set("tenant_id" as any, tenantId);
+        c.set("user_id" as any, "user_op");
+        await next();
+      });
+      root.route(
+        "/v1/workspace",
+        operationsRoutes(() => service, { ticketStore: () => null }),
+      );
+
+      const mintRes = await root.request("http://localhost/v1/workspace/auth/ticket", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ run_id: run.id }),
+      });
+      expect(mintRes.status).toBe(200);
+      const { ticket } = await mintRes.json<{ ticket: string }>();
+
+      // Map path: the minted ticket NEVER touched the shared store…
+      expect(await ticketStore.consume(ticket)).toBeNull();
+      // …and the in-process gate accepts it (single-use there instead).
+      const sseRes = await root.request(
+        `http://localhost/v1/workspace/runs/${run.id}/events/stream?token=${ticket}`,
+      );
+      expect(sseRes.status).toBe(200);
+      await sseRes.body?.cancel();
     } finally {
       cleanup();
     }

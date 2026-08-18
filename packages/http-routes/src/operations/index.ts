@@ -139,16 +139,32 @@ export interface OperationsRoutesOptions {
    * deployments MUST inject a store backed by shared storage (e.g.
    * DrizzleSseTicketStore on the same DB as the service) — otherwise a
    * ticket minted on replica A is rejected by replica B.
+   *
+   * F3 P2-①: on runtimes where the DB binding flows per-request (CF D1
+   * arrives on c.var, not at mount time), pass a RESOLVER instead — it is
+   * called on each mint/consume with the route context. A resolver
+   * returning null/undefined falls back to the in-process Map for that
+   * request.
    */
-  ticketStore?: SseTicketStorePort;
+  ticketStore?: SseTicketStorePort | ((c: RouteCtx) => SseTicketStorePort | null | undefined);
 }
 
+/** Minimal per-request context shape shared by the getter + resolver options. */
+type RouteCtx = { env: Env; var: Record<string, unknown> };
+
 export function operationsRoutes(
-  getOperationsService: (c: { env: Env; var: Record<string, unknown> }) => OperationsService,
+  getOperationsService: (c: RouteCtx) => OperationsService,
   opts: OperationsRoutesOptions = {},
 ) {
   const streamHub = opts.hub ?? globalOperationsStreamHub;
-  const ticketStore = opts.ticketStore ?? null;
+  // F3 P2-①: ticket truth may be per-request (CF D1 binding arrives on
+  // c.var). Resolve per mint/consume; null → in-process Map fallback.
+  const resolveTicketStore = (c: RouteCtx): SseTicketStorePort | null => {
+    if (!opts.ticketStore) return null;
+    return typeof opts.ticketStore === "function"
+      ? opts.ticketStore(c) ?? null
+      : opts.ticketStore;
+  };
   const app = new Hono<{
     Bindings: Env;
     Variables: OperationsVariables;
@@ -502,11 +518,12 @@ export function operationsRoutes(
       } catch {
         // No body provided
       }
-      if (ticketStore) {
+      const store = resolveTicketStore(c);
+      if (store) {
         // Shared-truth path (F3): mint locally, persist to the injected
         // store so ANY replica can consume it.
         const ticket = mintTokenHex();
-        await ticketStore.issue({
+        await store.issue({
           token: ticket,
           tenantId,
           userId,
@@ -540,8 +557,9 @@ export function operationsRoutes(
     // headers), the ticket's own tenant binding is the authority.
     // Injected store (F3): consume from the shared truth — atomic
     // single-use across replicas. Default: the in-process Map.
-    const verified = ticketStore
-      ? await consumeFromStore(ticketStore, token, {
+    const store = resolveTicketStore(c);
+    const verified = store
+      ? await consumeFromStore(store, token, {
           expectedTenantId: tenantId || undefined,
           expectedRunId: runId,
         })
