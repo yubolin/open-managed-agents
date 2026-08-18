@@ -391,16 +391,34 @@ app.route("/v1/tenants", tenantsRoutes);
 app.route("/v1/evals", evalsRoutes);
 app.route("/v1/cost_report", costReportRoutes);
 app.route("/v1/integrations", integrationsRoutes);
-// F3 P2-①: SSE ticket truth on D1. The per-tenant D1 binding flows through
-// c.var (there is no DB at mount time), so the ticketStore is a per-request
-// RESOLVER. It rides the same physical D1 as services.operations — any
-// isolate minting and any isolate consuming see one atomic single-use truth
-// (DELETE ... RETURNING), killing the cross-isolate 401 loop.
+// F3 P2-① & P2-②: SSE ticket truth on D1 + OperationsStreamRoom DO fanout.
+// Ticket truth is resolved per-request from c.var.tenantDb (DELETE ... RETURNING).
+// Verified SSE streams are delegated directly to the per-(tenant,run) DO broadcast room.
 app.route(
   "/v1/workspace",
-  operationsRoutes((c) => (c.var as { services: Services }).services.operations, {
-    ticketStore: (c) => createCfSseTicketStore((c as AppCtx).var.tenantDb),
-  }),
+  operationsRoutes(
+    (c) => (c.var as { services: Services }).services.operations,
+    {
+      ticketStore: (c) => createCfSseTicketStore((c as AppCtx).var.tenantDb),
+      streamHandler: (c, { tenantId, runId }) => {
+        const appEnv = (c as AppCtx).env;
+        if (!appEnv.OPERATIONS_STREAM_ROOM) {
+          return new Response(
+            JSON.stringify({ error: "OPERATIONS_STREAM_ROOM binding missing", code: "SERVICE_UNAVAILABLE" }),
+            { status: 503, headers: { "content-type": "application/json" } },
+          );
+        }
+        const id = appEnv.OPERATIONS_STREAM_ROOM.idFromName(`${tenantId}::${runId}`);
+        const stub = appEnv.OPERATIONS_STREAM_ROOM.get(id);
+        return stub.fetch("https://operations-stream-room/stream", {
+          headers: {
+            "x-tenant-id": tenantId,
+            "x-run-id": runId,
+          },
+        });
+      },
+    },
+  ),
 );
 app.route("/v1/runtimes", runtimesRoutes);
 app.route("/v1/stats", statsRoutes);
@@ -563,6 +581,7 @@ export default {
 // DO classes must be re-exported from the worker entry so wrangler can find
 // them by class_name in durable_objects.bindings + migrations.
 export { RuntimeRoom } from "./runtime-room";
+export { OperationsStreamRoom } from "./operations-stream-room";
 
 /**
  * RPC entrypoint for the agent worker (cloud agent path) to forward MCP

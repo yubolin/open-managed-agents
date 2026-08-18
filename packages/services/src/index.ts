@@ -85,6 +85,7 @@ import {
 import {
   OperationsService,
   createCfOperationsService,
+  CfOperationsStreamHub,
 } from "@open-managed-agents/operations-store";
 import {
   CfSharedAuthDbProvider,
@@ -331,7 +332,10 @@ export function buildServices(env: Env, db: D1Database): Services {
     }),
     outboundSnapshots: createCfOutboundSnapshotService(env),
     sessionSecrets: createCfSessionSecretService(env),
-    operations: createCfOperationsService({ db }),
+    operations: createCfOperationsService({
+      db,
+      hub: env.OPERATIONS_STREAM_ROOM ? new CfOperationsStreamHub(env.OPERATIONS_STREAM_ROOM) : undefined,
+    }),
     // Control-plane services: always query env.ROUTER_DB (not the per-tenant
     // db). Falls back to env.MAIN_DB during the rollout grace period when
     // ROUTER_DB binding may not yet be present in older deployments.

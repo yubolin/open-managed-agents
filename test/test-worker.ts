@@ -207,6 +207,7 @@ registerHarness("crash-v2", () => ({
 export { SessionDO } from "../apps/agent/src/runtime/session-do";
 export { Sandbox } from "@cloudflare/sandbox";
 export { RuntimeRoom } from "../apps/main/src/runtime-room";
+export { OperationsStreamRoom } from "../apps/main/src/operations-stream-room";
 export { outbound, outboundByHost } from "../apps/agent/src/outbound";
 
 // --- Migration bootstrap ---

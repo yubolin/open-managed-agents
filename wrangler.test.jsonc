@@ -24,14 +24,15 @@
     "bindings": [
       { "name": "SESSION_DO", "class_name": "SessionDO" },
       { "name": "SANDBOX", "class_name": "Sandbox" },
-      { "name": "RUNTIME_ROOM", "class_name": "RuntimeRoom" }
+      { "name": "RUNTIME_ROOM", "class_name": "RuntimeRoom" },
+      { "name": "OPERATIONS_STREAM_ROOM", "class_name": "OperationsStreamRoom" }
     ]
   },
 
   "migrations": [
     {
       "tag": "v1",
-      "new_sqlite_classes": ["SessionDO", "Sandbox", "RuntimeRoom"]
+      "new_sqlite_classes": ["SessionDO", "Sandbox", "RuntimeRoom", "OperationsStreamRoom"]
     }
   ]
 }

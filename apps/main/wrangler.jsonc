@@ -72,7 +72,8 @@
 
   "durable_objects": {
     "bindings": [
-      { "name": "RUNTIME_ROOM", "class_name": "RuntimeRoom" }
+      { "name": "RUNTIME_ROOM", "class_name": "RuntimeRoom" },
+      { "name": "OPERATIONS_STREAM_ROOM", "class_name": "OperationsStreamRoom" }
     ]
   },
 
@@ -113,6 +114,10 @@
     {
       "tag": "v5",
       "new_sqlite_classes": ["RuntimeRoom"]
+    },
+    {
+      "tag": "v6",
+      "new_sqlite_classes": ["OperationsStreamRoom"]
     }
   ],
 
@@ -220,7 +225,8 @@
       ],
       "durable_objects": {
         "bindings": [
-          { "name": "RUNTIME_ROOM", "class_name": "RuntimeRoom" }
+          { "name": "RUNTIME_ROOM", "class_name": "RuntimeRoom" },
+          { "name": "OPERATIONS_STREAM_ROOM", "class_name": "OperationsStreamRoom" }
         ]
       },
       "send_email": [
@@ -308,7 +314,8 @@
       ],
       "durable_objects": {
         "bindings": [
-          { "name": "RUNTIME_ROOM", "class_name": "RuntimeRoom" }
+          { "name": "RUNTIME_ROOM", "class_name": "RuntimeRoom" },
+          { "name": "OPERATIONS_STREAM_ROOM", "class_name": "OperationsStreamRoom" }
         ]
       },
       "limits": { "cpu_ms": 300000 },

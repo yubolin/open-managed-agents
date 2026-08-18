@@ -230,6 +230,10 @@ export interface Env {
    *  delegate its agent loop to a Claude Code (or other ACP) child running
    *  on the user's machine. Bound only on apps/main. */
   RUNTIME_ROOM?: DurableObjectNamespace;
+  /** Operations Workspace real-time event stream DO (F3 P2-②).
+   *  Single broadcast anchor per (tenantId, runId) for multi-isolate SSE fanout.
+   *  Bound on apps/main. */
+  OPERATIONS_STREAM_ROOM?: DurableObjectNamespace;
   /** Service binding from per-env sandbox workers back to the main worker.
    *  AcpProxyHarness uses this to call /v1/internal/runtime-turn — going
    *  through HTTP keeps the auth surface narrow (one internal-secret-gated

@@ -147,6 +147,15 @@ export interface OperationsRoutesOptions {
    * request.
    */
   ticketStore?: SseTicketStorePort | ((c: RouteCtx) => SseTicketStorePort | null | undefined);
+  /**
+   * Optional custom SSE stream handler (F3 P2-②).
+   * Used on Cloudflare Workers where the SSE stream connection is delegated
+   * directly to a Durable Object (OperationsStreamRoom) anchor.
+   */
+  streamHandler?: (
+    c: any,
+    info: { tenantId: string; runId: string; userId: string },
+  ) => Response | Promise<Response>;
 }
 
 /** Minimal per-request context shape shared by the getter + resolver options. */
@@ -576,6 +585,10 @@ export function operationsRoutes(
       }
     } catch {
       return c.json({ error: `Run not found: ${runId}`, code: "RUN_NOT_FOUND" }, 404);
+    }
+
+    if (opts.streamHandler) {
+      return opts.streamHandler(c, { tenantId: verified.tenantId, runId, userId: verified.userId });
     }
 
     const encoder = new TextEncoder();

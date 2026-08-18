@@ -10,6 +10,7 @@ export * from "./timeout-policy";
 export * from "./test-fakes";
 export * from "./adapters/drizzle";
 export * from "./adapters/drizzle-sse-tickets";
+export * from "./adapters/cf-stream-hub";
 
 import { drizzle } from "drizzle-orm/d1";
 import type { OmaDb } from "@open-managed-agents/db-schema";
@@ -37,9 +38,12 @@ export function createOperationsService(
   return new OperationsService(store, opts.hub);
 }
 
-export function createCfOperationsService(deps: { db: D1Database }): OperationsService {
+export function createCfOperationsService(deps: {
+  db: D1Database;
+  hub?: OperationsStreamHubPort;
+}): OperationsService {
   const drz = drizzle(deps.db) as unknown as OmaDb;
-  return createOperationsService(drz);
+  return createOperationsService(drz, { hub: deps.hub });
 }
 
 /**
