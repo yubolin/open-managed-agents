@@ -1183,6 +1183,79 @@ export interface WorkspaceStreamEvent {
   ts: number;
 }
 
+export interface WorkspaceServiceTemplateItem {
+  id: string;
+  name: string;
+  code: string;
+  category: "diagnostic" | "change_plan";
+  description?: string | null;
+  is_active: number;
+  version: number;
+  version_id: string;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface WorkspaceServiceTemplatesListResponse {
+  templates: WorkspaceServiceTemplateItem[];
+}
+
+export interface WorkspaceServiceTemplateDetail extends WorkspaceServiceTemplateItem {
+  form_schema: Record<string, any>;
+  ui_schema?: Record<string, any> | null;
+  approval_policy: Record<string, any>;
+  timeout_policy: Record<string, any>;
+}
+
+export interface WorkspaceRunDetailResponse {
+  run: WorkspaceRunDto;
+}
+
+export interface WorkspaceRunSummaryItem extends WorkspaceRunDto {
+  template_name?: string;
+}
+
+export interface WorkspaceRunsListResponse {
+  runs: WorkspaceRunSummaryItem[];
+  next_cursor?: string | null;
+}
+
+export interface WorkspaceArtifactDto {
+  id: string;
+  run_id: string;
+  tenant_id: string;
+  type: WorkspaceArtifactType;
+  version: number;
+  content: string;
+  content_sha256: string;
+  metadata?: string | null;
+  created_by: string;
+  created_at: number;
+}
+
+export interface WorkspaceArtifactsListResponse {
+  artifacts: WorkspaceArtifactDto[];
+}
+
+export interface WorkspacePendingApprovalItem {
+  run_id: string;
+  tenant_id: string;
+  title: string;
+  state: WorkspaceRunState;
+  created_by: string;
+  current_stage: number;
+  stage_name: string;
+  group_id: string;
+  plan_hash?: string | null;
+  evidence_snapshot_hash?: string | null;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface WorkspaceApprovalsListResponse {
+  approvals: WorkspacePendingApprovalItem[];
+}
+
 export interface CreateWorkspaceAuthTicketRequest {
   run_id?: string;
 }
