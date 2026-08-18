@@ -1229,8 +1229,36 @@ export interface WorkspaceTemplateVersionResponse {
   version: WorkspaceTemplateVersionDetail;
 }
 
+export interface WorkspaceApprovalStageItem {
+  stage_order: number;
+  stage_name: string;
+  group_id: string;
+  required_approvals: number;
+}
+
+export interface WorkspaceApprovalPolicyDto {
+  mode: "sequential_groups";
+  stages: WorkspaceApprovalStageItem[];
+}
+
+export interface WorkspaceApprovalRecordDto {
+  id: string;
+  run_id: string;
+  tenant_id: string;
+  stage_order: number;
+  approver_id: string;
+  decision: "approved" | "rejected" | "changes_requested";
+  comment?: string | null;
+  plan_hash_at_decision?: string | null;
+  evidence_snapshot_hash_at_decision?: string | null;
+  created_at: number;
+}
+
 export interface WorkspaceRunDetailResponse {
   run: WorkspaceRunDto;
+  approvals?: WorkspaceApprovalRecordDto[];
+  artifacts?: WorkspaceArtifactDto[];
+  approval_policy?: WorkspaceApprovalPolicyDto | null;
 }
 
 export interface WorkspaceRunSummaryItem extends WorkspaceRunDto {

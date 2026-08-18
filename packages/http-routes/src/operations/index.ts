@@ -416,10 +416,21 @@ export function operationsRoutes(
       const approvals = await service.listApprovals(tenantId, runId);
       const artifacts = await service.listArtifacts(tenantId, runId);
 
+      let approvalPolicy = null;
+      try {
+        const version = await service.getTemplateVersion(tenantId, run.template_version_id);
+        if (version?.approval_policy) {
+          approvalPolicy = JSON.parse(version.approval_policy);
+        }
+      } catch {
+        // template version might not exist or be deleted
+      }
+
       return c.json({
         run,
         approvals,
         artifacts,
+        approval_policy: approvalPolicy,
       });
     } catch (err) {
       return handleError(c, err);

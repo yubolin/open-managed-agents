@@ -15,6 +15,7 @@ import { useRunStream } from "../lib/use-run-stream";
 import { StateBadge } from "../components/StateBadge";
 import { HashBadge } from "../components/HashBadge";
 import { StateTimeline } from "../components/StateTimeline";
+import { ApprovalPipeline } from "../components/ApprovalPipeline";
 import { MarkdownViewer } from "../components/MarkdownViewer";
 import { EvidenceViewer } from "../components/EvidenceViewer";
 import { formatDate } from "../lib/utils";
@@ -160,6 +161,14 @@ export function RunDetailPage() {
 
       {/* State Machine Timeline */}
       <StateTimeline state={run.state as WorkspaceRunState} />
+
+      {/* Multi-Stage Approval Pipeline Timeline */}
+      <ApprovalPipeline
+        policy={data.approval_policy}
+        currentStage={run.current_approval_stage}
+        runState={run.state as WorkspaceRunState}
+        approvals={data.approvals || []}
+      />
 
       {/* Hash Fingerprints & Stage Meta */}
       <div className="glass-panel rounded-xl p-4 border border-slate-800/90 flex flex-wrap items-center justify-between gap-4">
