@@ -26,11 +26,10 @@ const STEPS: Step[] = [
 
 export function StateTimeline({ state, className }: StateTimelineProps) {
   // Determine active step index
-  let activeIndex = 0;
   if (state === "draft" || state === "submitted") activeIndex = 0;
   else if (state === "planning") activeIndex = 1;
-  else if (["awaiting_approval", "approved", "changes_requested", "approval_invalidated", "rejected"].includes(state)) activeIndex = 2;
-  else if (state === "executing") activeIndex = 3;
+  else if (["awaiting_approval", "changes_requested", "approval_invalidated", "rejected"].includes(state)) activeIndex = 2;
+  else if (state === "approved" || state === "executing") activeIndex = 3;
   else if (["succeeded", "failed", "cancelled", "interrupted"].includes(state)) activeIndex = 4;
 
   const isFailed = ["failed", "rejected", "approval_invalidated", "cancelled", "interrupted"].includes(state);
