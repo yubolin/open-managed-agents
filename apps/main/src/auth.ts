@@ -24,6 +24,19 @@ export const authMiddleware = createMiddleware<{
   if (c.req.path.startsWith("/v1/mcp-proxy/")) {
     return next();
   }
+  // Operations SSE stream (#14 GET /v1/workspace/runs/:id/events/stream):
+  // EventSource cannot send x-api-key headers, and cross-origin SPA clients
+  // carry no Console session cookie — upstream auth here would strand a
+  // perfectly valid ticket. The stream authenticates with its own single-use
+  // ticket (?token=): consumed atomically inside the route, tenant-bound,
+  // 30s TTL, run-existence anti-probe (spec §3.5 — the ticket IS the auth).
+  // Ticket MINT (#13 POST /auth/ticket) deliberately stays behind full auth.
+  if (
+    c.req.method === "GET" &&
+    /^\/v1\/workspace\/runs\/[^/]+\/events\/stream$/.test(c.req.path)
+  ) {
+    return next();
+  }
 
   // 1. Try API Key authentication (for CLI / SDK)
   const apiKey = c.req.header("x-api-key");

@@ -234,6 +234,14 @@ export interface Env {
    *  Single broadcast anchor per (tenantId, runId) for multi-isolate SSE fanout.
    *  Bound on apps/main. */
   OPERATIONS_STREAM_ROOM?: DurableObjectNamespace;
+  /** Operations approval-timeout scheduler (F3 P3-③) — bootstrap-tier Feishu
+   *  credentials for escalation card egress (NOT vault tier; same semantics
+   *  as main-node's OPERATIONS_FEISHU_APP_ID/SECRET). Without them the tick
+   *  still cancels and audits; cards degrade to delivered:false. */
+  OPERATIONS_FEISHU_APP_ID?: string;
+  OPERATIONS_FEISHU_APP_SECRET?: string;
+  /** Deep-link base for escalation card buttons; default http://localhost:5175. */
+  OPERATIONS_WORKSPACE_BASE_URL?: string;
   /** Service binding from per-env sandbox workers back to the main worker.
    *  AcpProxyHarness uses this to call /v1/internal/runtime-turn — going
    *  through HTTP keeps the auth surface narrow (one internal-secret-gated

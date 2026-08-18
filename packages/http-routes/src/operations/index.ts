@@ -150,16 +150,18 @@ export interface OperationsRoutesOptions {
   /**
    * Optional custom SSE stream handler (F3 P2-②).
    * Used on Cloudflare Workers where the SSE stream connection is delegated
-   * directly to a Durable Object (OperationsStreamRoom) anchor.
+   * directly to a Durable Object (OperationsStreamRoom) anchor. Invoked
+   * AFTER the ticket is consumed and the run's existence is anti-probed —
+   * tenants/user come from the verified ticket, never from the request.
    */
   streamHandler?: (
-    c: any,
+    c: RouteCtx,
     info: { tenantId: string; runId: string; userId: string },
   ) => Response | Promise<Response>;
 }
 
 /** Minimal per-request context shape shared by the getter + resolver options. */
-type RouteCtx = { env: Env; var: Record<string, unknown> };
+export type RouteCtx = { env: Env; var: Record<string, unknown> };
 
 export function operationsRoutes(
   getOperationsService: (c: RouteCtx) => OperationsService,
@@ -593,7 +595,10 @@ export function operationsRoutes(
 
     const encoder = new TextEncoder();
     let unsubscribe: (() => void) | null = null;
-    let heartbeatTimer: any = null;
+    // Stop-handle instead of a typed timer reference: the package compiles
+    // against both DOM and Node timer libs, and any single annotation for
+    // the handle clashes with one of the two clearInterval overloads.
+    let stopHeartbeat: (() => void) | null = null;
 
     const stream = new ReadableStream({
       start(controller) {
@@ -613,17 +618,18 @@ export function operationsRoutes(
         });
 
         // 15s keepalive heartbeat
-        heartbeatTimer = setInterval(() => {
+        const heartbeatTimer = setInterval(() => {
           try {
             controller.enqueue(encoder.encode(`:heartbeat ${Date.now()}\n\n`));
           } catch {
-            clearInterval(heartbeatTimer);
+            stopHeartbeat?.();
           }
         }, 15000);
+        stopHeartbeat = () => clearInterval(heartbeatTimer);
       },
       cancel() {
         if (unsubscribe) unsubscribe();
-        if (heartbeatTimer) clearInterval(heartbeatTimer);
+        stopHeartbeat?.();
       },
     });
 

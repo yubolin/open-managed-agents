@@ -7,7 +7,9 @@ import { CfOperationsStreamHub } from "@open-managed-agents/operations-store";
 import type { WorkspaceStreamEvent } from "@open-managed-agents/api-types";
 
 describe("OperationsStreamRoom DO · real DO (workerd)", () => {
-  const roomNamespace = (env as any).OPERATIONS_STREAM_ROOM as DurableObjectNamespace;
+  const roomNamespace = (env as unknown as {
+    OPERATIONS_STREAM_ROOM: DurableObjectNamespace;
+  }).OPERATIONS_STREAM_ROOM;
 
   it("do-1: handles SSE stream lifecycle with connected event", async () => {
     const runId = `run_do_test_${Date.now()}`;
@@ -194,5 +196,57 @@ describe("OperationsStreamRoom DO · real DO (workerd)", () => {
 
     await reader1.cancel();
     await reader2.cancel();
+  });
+
+  it("do-6: hub with waitUntil anchors the DO publish to the event context (H-1)", async () => {
+    const runId = `run_waituntil_${Date.now()}`;
+    const tenantId = "tenant_waituntil";
+
+    // Stand-in for c.executionCtx.waitUntil — captures the promises the
+    // hub asks the runtime to keep alive past the response.
+    const anchored: Promise<unknown>[] = [];
+    const waitUntil = (p: Promise<unknown>) => {
+      anchored.push(p);
+    };
+
+    const hub = new CfOperationsStreamHub(roomNamespace, waitUntil);
+
+    // No subscribers: publish must STILL route through waitUntil — an
+    // in-flight /publish that wakes the DO is exactly the subrequest the
+    // runtime would cancel without anchoring.
+    hub.publish(tenantId, runId, {
+      event_type: "run.escalation",
+      tenant_id: tenantId,
+      run_id: runId,
+      timestamp: Date.now(),
+      payload: { action: "notify_feishu_group", at_minute: 2, delivered: true },
+    });
+    expect(anchored.length).toBe(1);
+
+    // The anchored promise settles (delivery attempted), never rejects —
+    // best-effort semantics hold under waitUntil.
+    await anchored[0];
+
+    // End-to-end: a subscribed room receives the anchored publish.
+    const stub = roomNamespace.get(roomNamespace.idFromName(`${tenantId}::${runId}`));
+    const streamRes = await stub.fetch("https://operations-stream-room/stream");
+    const reader = streamRes.body!.getReader();
+    await reader.read(); // connected frame
+
+    hub.publish(tenantId, runId, {
+      event_type: "run.state_changed",
+      tenant_id: tenantId,
+      run_id: runId,
+      timestamp: Date.now(),
+      payload: { from: "awaiting_approval", to: "approved" },
+    });
+    expect(anchored.length).toBe(2);
+    await anchored[1];
+
+    const { value, done } = await reader.read();
+    expect(done).toBe(false);
+    expect(new TextDecoder().decode(value)).toContain("event: run.state_changed");
+
+    await reader.cancel();
   });
 });

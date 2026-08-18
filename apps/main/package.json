@@ -19,6 +19,7 @@
     "@open-managed-agents/environments-store": "workspace:*",
     "@open-managed-agents/evals-runner": "workspace:*",
     "@open-managed-agents/evals-store": "workspace:*",
+    "@open-managed-agents/feishu": "workspace:*",
     "@open-managed-agents/files-store": "workspace:*",
     "@open-managed-agents/http-routes": "workspace:*",
     "@open-managed-agents/integrations-adapters-cf": "workspace:*",

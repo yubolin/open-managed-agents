@@ -7,6 +7,7 @@ export * from "./service";
 export * from "./stream";
 export * from "./sse-tickets";
 export * from "./timeout-policy";
+export * from "./timeout-tick";
 export * from "./test-fakes";
 export * from "./adapters/drizzle";
 export * from "./adapters/drizzle-sse-tickets";

@@ -10,6 +10,7 @@
   "dependencies": {
     "@open-managed-agents/api-types": "workspace:*",
     "@open-managed-agents/db-schema": "workspace:*",
+    "@open-managed-agents/observability": "workspace:*",
     "@open-managed-agents/shared": "workspace:*",
     "@open-managed-agents/sql-client": "workspace:*",
     "drizzle-orm": "^0.45.2"

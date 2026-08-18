@@ -476,6 +476,9 @@ importers:
       '@open-managed-agents/evals-store':
         specifier: workspace:*
         version: link:../../packages/evals-store
+      '@open-managed-agents/feishu':
+        specifier: workspace:*
+        version: link:../../packages/feishu
       '@open-managed-agents/files-store':
         specifier: workspace:*
         version: link:../../packages/files-store
@@ -1444,6 +1447,9 @@ importers:
       '@open-managed-agents/db-schema':
         specifier: workspace:*
         version: link:../db-schema
+      '@open-managed-agents/observability':
+        specifier: workspace:*
+        version: link:../observability
       '@open-managed-agents/shared':
         specifier: workspace:*
         version: link:../shared

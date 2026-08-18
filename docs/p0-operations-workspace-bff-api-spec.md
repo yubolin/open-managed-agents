@@ -2,6 +2,7 @@
 
 > 状态：v0.4 · **评审定稿**（2026-08-17）
 > 修订记录：
+> - v0.4.8（2026-08-18）：F3 Phase 2 + P3-③ CF/D1 边缘架构对齐（§3.5 增补）——D1 Ticket 真源按请求解析（`c.var.tenantDb`）、`OperationsStreamRoom` DO 单点广播锚（`idFromName(tenant::run)`）、stream GET 豁免上游鉴权（Ticket 即权威，出票口仍全鉴权）、DO 发布以 `waitUntil` 锚定请求上下文；审批超时调度器抽取共享 tick 并注册 CF Cron（`OPERATIONS_TIMEOUT_CRON` 可配），跨 shard 扫描、旧 shard 软跳过。
 > - v0.4.7（2026-08-18）：F3 Phase 1 跨副本契约增补（§3.5）——SSE Ticket 落库 `sse_tickets` 共享真源（DELETE RETURNING 原子单次消费）、PG LISTEN/NOTIFY 跨副本事件扇出（`oma_operations_events` 单通道 + origin-id 回声过滤）、通知层语义（无补帧）与超限帧本地降级；新增 `OPERATIONS_PG_SSE_HUB` 开关。
 > - v0.4.6（2026-08-18）：新增 §3.6 审批超时调度器（Base E）——超时升级动作语义、`run.escalation` SSE 事件类型、系统取消审计与部署开关；不改变任何既有端点契约。
 > - v0.4（2026-08-17）：闭合 Review R0——API 契约面自 7 个端点找回补全至 **13 个**：恢复服务目录接口（§3.1 #1/#2）、Run 查询与回看接口（§3.3 #7 列表 / #8 详情 / #9 历史事件，其中列表/详情自 v0.1 找回并升级 `current_approval_stage` 与双哈希字段）、审批待办全量定义（§3.4 #10，序列图引用自此有实体定义）；恢复旅程 1 序列图（§2.1）与 §3 鉴权总则；SSE Ticket 补限流与重放防护说明（R9 部分）。
@@ -362,12 +363,17 @@ sequenceDiagram
     - **PG LISTEN/NOTIFY 事件扇出**：PG 模式下 OperationsStreamHub 换装 `PgOperationsStreamHub`——单通道 `oma_operations_events`，本地扇出先行、NOTIFY 跨副本广播，payload 携带发布方随机 origin-id 做**回声过滤**（PG 会把 NOTIFY 回声给发布者，本地已扇出过，必须丢弃）。经 H3 注入缝接线：service 与 BFF 必须共享同一 hub 实例。开关 `OPERATIONS_PG_SSE_HUB=0` 可熔断回退单进程内存扇出（默认开启）。
     - **通知层语义（无补帧）**：operations 流**不做** gap recovery（区别于会话流的 seq 水位线）——SSE 是通知层而非事实源，事实源是 DB + REST（`GET /runs/:id`）；LISTEN 掉线窗口丢帧即丢，F6 重连换票是恢复路径。
     - **超限帧本地降级**：PG NOTIFY payload 上限 8000 字节；超 7.5KB 的帧本地扇出 + warn、**不跨副本 NOTIFY**（其他副本缺该帧，同通知层语义）。
+  - **CF/D1 边缘架构对齐 (F3 Phase 2 + P3-③，v0.4.8)**：Cloudflare Workers 形态下无 PG LISTEN/NOTIFY、无进程常驻调度器，裁定：
+    - **D1 Ticket 真源（P2-①）**：`apps/main` 挂载点按请求解析 `c.var.tenantDb` 实例化 `DrizzleSseTicketStore`——D1 绑定随请求到达，挂载时刻不可得；消费即 `DELETE ... RETURNING`，与三方言同语义。
+    - **DO 单点广播锚（P2-②）**：`OperationsStreamRoom` Durable Object 以 `idFromName(\`tenant::run\`)` 寻址——DO 单实例语义天然跨 isolate，副本 A 发布、副本 B 的订阅者同房可达。BFF 路由在 **Ticket 消费 + `getRun` 404 反探测之后**将整条 SSE 连接委托给 DO（鉴权先于委托）；DO 发 `event: connected` 首帧 + 15s `:heartbeat` 注释行心跳，帧格式与 main-node 逐字节同构（具名事件 + JSON data）。`hub.publish` 为 best-effort（失败不影响 DB 事务），但**必须以 `executionCtx.waitUntil` 锚定**——Workers 运行时在响应返回后可取消在途子请求，未锚定的 fire-and-forget 发布是间歇性丢帧源（H-1）。
+    - **stream GET 豁免上游鉴权（H-2）**：`apps/main` 的 `/v1/*` authMiddleware 豁免 `GET /v1/workspace/runs/:id/events/stream`——EventSource 发不出 `x-api-key`，跨源 SPA 无 Console 会话 Cookie，上游强制鉴权会使合法 Ticket 永远 401。豁免后 **Ticket 即该端点唯一权威**（单次消费 + 30s TTL + 租户绑定 + 404 反探测仍在路由内）；`POST /auth/ticket` 出票口**保持全鉴权**。
+    - **审批超时调度器 CF 注册（P3-③）**：scan-and-act 逻辑抽取为共享 `runOperationsTimeoutTick`（Node interval 与 CF Cron 跑同一份代码，仅点火机制不同；§3.6 语义不变、无自动批准不变量不变）。CF 侧经 shard 注册表跨租户扫描（`forEachShardServices`），**早于 operations 迁移（0003）的 shard 软跳过**、注册表不可读降级为记日志空转；cron 默认每分钟、`OPERATIONS_TIMEOUT_CRON` 可配；卡片出票用 bootstrap 层凭证（`OPERATIONS_FEISHU_APP_ID/SECRET`），缺凭证时卡片诚实降级 `delivered:false`、取消路径照跑——与 main-node 逐位同语义。CF Cron 每调度事件每 worker 至多发火一次，跨副本去重免费；重叠 tick 由 `run_events` 去重标记 + `cancelRun` CAS 兜底。
 
 ### 3.6 审批超时调度器（Base E，v0.4.6）
 
 > 本节定义**系统侧后台组件**的行为契约，不新增 REST 端点。语义源头：run-model §6.3（裁决 5）与模板 spec §3.2（`timeout_policy`）。
 
-- **调度循环**：main-node 进程内定时 tick（默认 60s，`OPERATIONS_TIMEOUT_INTERVAL_MS` 可配；`OPERATIONS_TIMEOUT_SCHEDULER=0` 关停），系统级扫描全部租户的 `awaiting_approval` Run（`listAwaitingApprovalRunsSystem`，仅调度器可用、永不经 BFF 暴露）。
+- **调度循环**：main-node 进程内定时 tick（默认 60s，`OPERATIONS_TIMEOUT_INTERVAL_MS` 可配；`OPERATIONS_TIMEOUT_SCHEDULER=0` 关停），系统级扫描全部租户的 `awaiting_approval` Run（`listAwaitingApprovalRunsSystem`，仅调度器可用、永不经 BFF 暴露）。CF 形态经 Cron Triggers 点火**同一份共享 tick**（`OPERATIONS_TIMEOUT_CRON` 可配，见 §3.5 v0.4.8）。
 - **超时锚点**：`runs.updated_at`——进入 `awaiting_approval` 与分级审批 stage 推进均会 CAS 刷新该字段，故**每个 stage 重新计时**。
 - **动作词表**（模板版本 `timeout_policy.escalation_actions[]`，`at_minute` 达阈触发，`run_events` 以 `action=run.escalation` + `payload.dedup_key="<action>:<at_minute>"` 去重——每动作一次机会，发送失败也计已尝试，防通知风暴）：
   1. `notify_feishu_group`：向 `target`（chat_id）发送飞书互动卡片（`msg_type=interactive`，含工单要素与工作台深链）；

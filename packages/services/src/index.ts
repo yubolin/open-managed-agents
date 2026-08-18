@@ -250,7 +250,11 @@ function mintCrypto(env: Env, label: string): WebCryptoAesGcm {
  *      relevant pickBackend call below
  *   3. Set STORE_BACKENDS={"<key>":"pg"} in the worker's env
  */
-export function buildServices(env: Env, db: D1Database): Services {
+export function buildServices(
+  env: Env,
+  db: D1Database,
+  opts?: { waitUntil?: (p: Promise<unknown>) => void },
+): Services {
   const overrides = parseStoreBackends(env);
   // At-rest encryption is mandatory in this build. Refuse to start if the
   // signing key isn't configured rather than silently writing plaintext —
@@ -334,7 +338,12 @@ export function buildServices(env: Env, db: D1Database): Services {
     sessionSecrets: createCfSessionSecretService(env),
     operations: createCfOperationsService({
       db,
-      hub: env.OPERATIONS_STREAM_ROOM ? new CfOperationsStreamHub(env.OPERATIONS_STREAM_ROOM) : undefined,
+      // H-1: waitUntil anchors fire-and-forget DO publishes to the request's
+      // event context — without it the runtime may cancel the in-flight
+      // /publish subrequest once the HTTP response returns.
+      hub: env.OPERATIONS_STREAM_ROOM
+        ? new CfOperationsStreamHub(env.OPERATIONS_STREAM_ROOM, opts?.waitUntil)
+        : undefined,
     }),
     // Control-plane services: always query env.ROUTER_DB (not the per-tenant
     // db). Falls back to env.MAIN_DB during the rollout grace period when
@@ -520,6 +529,11 @@ export const servicesMiddleware: MiddlewareHandler<AppContext> = async (
   c,
   next,
 ) => {
-  c.set("services", buildCfServices(c.env, c.var.tenantDb));
+  c.set(
+    "services",
+    buildCfServices(c.env, c.var.tenantDb, {
+      waitUntil: (p) => c.executionCtx.waitUntil(p),
+    }),
+  );
   await next();
 };

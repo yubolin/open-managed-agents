@@ -401,15 +401,19 @@ app.route(
     {
       ticketStore: (c) => createCfSseTicketStore((c as AppCtx).var.tenantDb),
       streamHandler: (c, { tenantId, runId }) => {
-        const appEnv = (c as AppCtx).env;
-        if (!appEnv.OPERATIONS_STREAM_ROOM) {
+        // RouteCtx.env is the shared Env — the DO binding is typed natively,
+        // no cast needed. Tenant/run come from the consumed ticket (route
+        // contract), never from these headers; they are advisory labels for
+        // the DO-side observability only.
+        const room = c.env.OPERATIONS_STREAM_ROOM;
+        if (!room) {
           return new Response(
             JSON.stringify({ error: "OPERATIONS_STREAM_ROOM binding missing", code: "SERVICE_UNAVAILABLE" }),
             { status: 503, headers: { "content-type": "application/json" } },
           );
         }
-        const id = appEnv.OPERATIONS_STREAM_ROOM.idFromName(`${tenantId}::${runId}`);
-        const stub = appEnv.OPERATIONS_STREAM_ROOM.get(id);
+        const id = room.idFromName(`${tenantId}::${runId}`);
+        const stub = room.get(id);
         return stub.fetch("https://operations-stream-room/stream", {
           headers: {
             "x-tenant-id": tenantId,
