@@ -1360,19 +1360,77 @@ if (process.env.OPERATIONS_TIMEOUT_SCHEDULER !== "0") {
   );
   const feishuAppId = process.env.OPERATIONS_FEISHU_APP_ID ?? null;
   const feishuAppSecret = process.env.OPERATIONS_FEISHU_APP_SECRET ?? null;
-  let cardSender: (chatId: string, card: unknown) => Promise<void> = async () => {
-    throw new Error("OPERATIONS_FEISHU_APP_ID/SECRET not configured (card egress disabled)");
-  };
-  if (feishuAppId && feishuAppSecret) {
-    const { FeishuApiClient } = await import("@open-managed-agents/feishu");
-    const cardClient = new FeishuApiClient(
-      { appId: feishuAppId, appSecret: feishuAppSecret },
-      new WorkerHttpClient(),
-    );
-    cardSender = async (chatId, card) => {
+  const feishuPubs = installBridge ? installBridge.buildContainers().feishu.feishuPublications : null;
+
+  let cardSender: (
+    chatId: string,
+    card: unknown,
+    ctx?: { tenantId?: string; runId?: string },
+  ) => Promise<void> = async (chatId, card, ctx) => {
+    // 1. Try to resolve live Feishu publications in the tenant (configured via OpenMA UI)
+    if (platformRootSecret) {
+      try {
+        const tenantToQuery = ctx?.tenantId ?? "tenant_default";
+        const rows =
+          (
+            await sql
+              .prepare(
+                `SELECT id, app_id, status FROM feishu_publications WHERE (tenant_id = ? OR tenant_id = 'tenant_default' OR tenant_id = 'tn_3137942b703f4ea903b624e3d1537152') AND status IN ('live', 'credentials_filled')`,
+              )
+              .bind(tenantToQuery)
+              .all<{ id: string; app_id: string | null; status: string }>()
+          ).results ?? [];
+
+        for (const row of rows) {
+          if (!row.app_id) continue;
+          if (feishuPubs) {
+            const secret = await feishuPubs.getAppSecret(row.id);
+            if (secret) {
+              const { FeishuApiClient } = await import("@open-managed-agents/feishu");
+              const cardClient = new FeishuApiClient(
+                { appId: row.app_id, appSecret: secret },
+                new WorkerHttpClient(),
+              );
+              try {
+                await cardClient.sendCard({ chatId, card });
+                return;
+              } catch (sendErr) {
+                logger.warn(
+                  {
+                    err: sendErr,
+                    op: "timeout_scheduler.publication_send_failed",
+                    app_id: row.app_id,
+                    chatId,
+                  },
+                  "bot sendCard failed; trying next live publication",
+                );
+              }
+            }
+          }
+        }
+      } catch (err) {
+        logger.warn(
+          { err, op: "timeout_scheduler.publication_card_failed", tenantId: ctx?.tenantId },
+          "failed to send escalation card via tenant feishu publication",
+        );
+      }
+    }
+
+    // 2. Fallback to bootstrap env credentials if configured
+    if (feishuAppId && feishuAppSecret) {
+      const { FeishuApiClient } = await import("@open-managed-agents/feishu");
+      const cardClient = new FeishuApiClient(
+        { appId: feishuAppId, appSecret: feishuAppSecret },
+        new WorkerHttpClient(),
+      );
       await cardClient.sendCard({ chatId, card });
-    };
-  }
+      return;
+    }
+
+    throw new Error(
+      "No accessible Feishu publication in tenant and OPERATIONS_FEISHU_APP_ID/SECRET not configured (card egress disabled)",
+    );
+  };
   operationsTimeoutScheduler = startOperationsTimeoutScheduler({
     service: operationsService,
     sendCard: cardSender,

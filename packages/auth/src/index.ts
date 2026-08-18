@@ -57,7 +57,8 @@ export function createAuthMiddleware(deps: AuthMiddlewareDeps) {
     if (bypassPath(c.req.path)) return next();
 
     if (deps.disabled) {
-      c.set("tenant_id", "default");
+      const headerTenant = c.req.header("x-tenant-id");
+      c.set("tenant_id", headerTenant || "default");
       // AUTH_DISABLED is dev-only ("every request becomes tenant_id=default").
       // Also synthesize user_id=default so user-scoped endpoints
       // (/v1/integrations/*, /v1/api_keys, etc.) work for local single-user
@@ -66,7 +67,8 @@ export function createAuthMiddleware(deps: AuthMiddlewareDeps) {
       // "legacy keys lack user_id". Only main-node consumes this shared
       // middleware (apps/main has its own auth.ts), so the blast radius is
       // dev-only.
-      c.set("user_id", "default");
+      const headerUser = c.req.header("x-user-id");
+      c.set("user_id", headerUser || "default");
       return next();
     }
 

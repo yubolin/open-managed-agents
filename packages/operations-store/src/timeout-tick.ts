@@ -49,7 +49,11 @@ export const SYSTEM_TIMEOUT_ACTOR: AuditActor = {
 };
 
 /** Egress for escalation cards (injected: FeishuApiClient.sendCard in prod). */
-export type SendEscalationCard = (chatId: string, card: unknown) => Promise<void>;
+export type SendEscalationCard = (
+  chatId: string,
+  card: unknown,
+  ctx?: { tenantId?: string; runId?: string },
+) => Promise<void>;
 
 export interface TimeoutTickOptions {
   service: OperationsService;
@@ -250,7 +254,11 @@ async function executeAction(
         );
         return false;
       }
-      await opts.sendCard(rule.target, buildEscalationCard(run, elapsedMinutes, workspaceBaseUrl));
+      await opts.sendCard(
+        rule.target,
+        buildEscalationCard(run, elapsedMinutes, workspaceBaseUrl),
+        { tenantId: run.tenant_id, runId: run.id },
+      );
       return true;
     }
     case "notify_process_owner": {

@@ -3,7 +3,7 @@
 // with a postgres scheme → postgres-js; otherwise sqlite at DATABASE_PATH
 // (default ./data/oma.db) with FK enforcement OFF to match D1's runtime.
 import { mkdirSync } from "node:fs";
-import { dirname } from "node:path";
+import { dirname, resolve } from "node:path";
 import type { OmaDb } from "@open-managed-agents/db-schema";
 
 export const PILOT_TENANT_DEFAULT = "tenant_default";
@@ -25,7 +25,8 @@ export async function openPilotDb(): Promise<OmaDb<Record<string, unknown>>> {
       Record<string, unknown>
     >;
   }
-  const dbPath = process.env.DATABASE_PATH ?? "./data/oma.db";
+  const defaultSqlitePath = resolve(import.meta.dirname, "../../data/oma.db");
+  const dbPath = process.env.DATABASE_PATH ?? defaultSqlitePath;
   mkdirSync(dirname(dbPath), { recursive: true });
   const { drizzle } = await import("drizzle-orm/better-sqlite3");
   const BetterSqlite3 = (await import("better-sqlite3")).default;
