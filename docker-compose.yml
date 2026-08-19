@@ -100,8 +100,8 @@ services:
 
   # CMDB MCP Knowledge Connector — stateless proxy to internal CMDB (https://10.0.21.209).
   # Exposes tools (mcp__cmdb__get_entity, mcp__cmdb__search_entities, mcp__cmdb__get_relationships)
-  # over Streamable-HTTP JSON-RPC on port 3910. No host port published — only oma-server
-  # reaches it on the compose network.
+  # over Streamable-HTTP JSON-RPC on port 3910. Outbound traffic to CMDB routes through oma-vault
+  # for transparent encrypted credential injection from the vault store.
   oma-cmdb-mcp:
     build:
       context: .
@@ -111,14 +111,22 @@ services:
     environment:
       PORT: "3910"
       CMDB_BASE_URL: ${CMDB_BASE_URL:-https://10.0.21.209}
+      # Scheme A (Vault mode): leave CMDB_API_TOKEN empty to let oma-vault inject the encrypted token
       CMDB_API_TOKEN: ${CMDB_API_TOKEN:-}
       CMDB_AUTH_HEADER: ${CMDB_AUTH_HEADER:-Authorization}
       CMDB_AUTH_SCHEME: ${CMDB_AUTH_SCHEME:-Bearer}
       CMDB_MCP_INGRESS_TOKEN: ${CMDB_MCP_INGRESS_TOKEN:-}
-      NODE_EXTRA_CA_CERTS: /app/certs/cmdb-ca.crt
+      # Vault outbound proxy
+      HTTPS_PROXY: http://oma-vault:14322
+      HTTP_PROXY: http://oma-vault:14322
+      NODE_EXTRA_CA_CERTS: /app/data/oma-vault-ca/ca.crt
       LOG_LEVEL: ${CMDB_MCP_LOG_LEVEL:-info}
     volumes:
       - ./secrets/cmdb-ca.crt:/app/certs/cmdb-ca.crt:ro
+      - ./data:/app/data:ro
+    depends_on:
+      oma-vault:
+        condition: service_started
     mem_limit: 256m
     restart: unless-stopped
     healthcheck:

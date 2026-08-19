@@ -2,16 +2,27 @@ import { loadConfig } from "./config.js";
 import { Logger } from "./logger.js";
 import { CmdbClient } from "./cmdb-client.js";
 import { createHttpServer } from "./http-server.js";
+import { setGlobalDispatcher, ProxyAgent } from "undici";
 
 async function main() {
   const config = loadConfig();
   const logger = new Logger(config.logLevel);
+
+  if (config.proxyUrl) {
+    logger.info(
+      { op: "cmdb-mcp.proxy_enabled", proxy_url: config.proxyUrl },
+      "Routing outbound CMDB traffic via Vault proxy",
+    );
+    setGlobalDispatcher(new ProxyAgent(config.proxyUrl));
+  }
 
   logger.info(
     {
       op: "cmdb-mcp.startup",
       port: config.port,
       cmdb_base_url: config.cmdbBaseUrl,
+      vault_proxy_enabled: !!config.proxyUrl,
+      direct_token_configured: !!config.cmdbApiToken,
       ingress_auth_enabled: !!config.ingressToken,
     },
     "Starting CMDB MCP service...",

@@ -113,5 +113,37 @@ services:
     # deploy:
     #   replicas: 3   # uncomment + put a Service / LB in front to fan-out
 
+  oma-cmdb-mcp:
+    build:
+      context: .
+      dockerfile: apps/cmdb-mcp/Dockerfile
+    image: openma/cmdb-mcp:dev
+    container_name: oma-cmdb-mcp
+    environment:
+      PORT: "3910"
+      CMDB_BASE_URL: ${CMDB_BASE_URL:-https://10.0.21.209}
+      CMDB_API_TOKEN: ${CMDB_API_TOKEN:-}
+      CMDB_AUTH_HEADER: ${CMDB_AUTH_HEADER:-Authorization}
+      CMDB_AUTH_SCHEME: ${CMDB_AUTH_SCHEME:-Bearer}
+      CMDB_MCP_INGRESS_TOKEN: ${CMDB_MCP_INGRESS_TOKEN:-}
+      HTTPS_PROXY: http://oma-vault:14322
+      HTTP_PROXY: http://oma-vault:14322
+      NODE_EXTRA_CA_CERTS: /app/data/oma-vault-ca/ca.crt
+      LOG_LEVEL: ${CMDB_MCP_LOG_LEVEL:-info}
+    volumes:
+      - ./secrets/cmdb-ca.crt:/app/certs/cmdb-ca.crt:ro
+      - ./data:/app/data:ro
+    depends_on:
+      oma-vault:
+        condition: service_started
+    mem_limit: 256m
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3910/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+
 volumes:
   oma-pgdata:

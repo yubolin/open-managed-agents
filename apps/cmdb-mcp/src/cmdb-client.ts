@@ -91,10 +91,14 @@ export class CmdbClient {
     const scheme = this.config.cmdbAuthScheme;
     const token = this.config.cmdbApiToken;
 
-    if (scheme) {
-      headers[headerName] = `${scheme} ${token}`;
-    } else {
-      headers[headerName] = token;
+    // Only inject manual header if token is explicitly configured in env.
+    // If empty (Vault proxy mode), the outbound request leaves clean and oma-vault transparently injects it.
+    if (token) {
+      if (scheme) {
+        headers[headerName] = `${scheme} ${token}`;
+      } else {
+        headers[headerName] = token;
+      }
     }
     return headers;
   }

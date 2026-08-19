@@ -5,6 +5,7 @@ export interface CmdbMcpConfig {
   cmdbAuthHeader: string;
   cmdbAuthScheme: string;
   ingressToken?: string;
+  proxyUrl?: string;
   logLevel: "debug" | "info" | "warn" | "error";
   requestTimeoutMs: number;
 }
@@ -16,6 +17,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): CmdbMcpConfig 
   const cmdbAuthHeader = (env.CMDB_AUTH_HEADER || "Authorization").trim();
   const cmdbAuthScheme = (env.CMDB_AUTH_SCHEME !== undefined ? env.CMDB_AUTH_SCHEME : "Bearer").trim();
   const ingressToken = (env.CMDB_MCP_INGRESS_TOKEN || "").trim() || undefined;
+  const proxyUrl = (env.HTTPS_PROXY || env.https_proxy || env.HTTP_PROXY || env.http_proxy || "").trim() || undefined;
   const rawLogLevel = (env.LOG_LEVEL || "info").toLowerCase();
   const logLevel: CmdbMcpConfig["logLevel"] =
     rawLogLevel === "debug" || rawLogLevel === "warn" || rawLogLevel === "error"
@@ -26,8 +28,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): CmdbMcpConfig 
   if (!cmdbBaseUrl) {
     throw new Error("Missing required environment variable: CMDB_BASE_URL");
   }
-  if (!cmdbApiToken) {
-    throw new Error("Missing required environment variable: CMDB_API_TOKEN");
+  // When using oma-vault (proxyUrl is set), token is injected by the vault sidecar
+  if (!cmdbApiToken && !proxyUrl) {
+    throw new Error("Missing required environment variable: CMDB_API_TOKEN (or configure HTTPS_PROXY for Vault injection)");
   }
 
   return {
@@ -37,6 +40,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): CmdbMcpConfig 
     cmdbAuthHeader,
     cmdbAuthScheme,
     ingressToken,
+    proxyUrl,
     logLevel,
     requestTimeoutMs: isNaN(requestTimeoutMs) ? 10000 : requestTimeoutMs,
   };
