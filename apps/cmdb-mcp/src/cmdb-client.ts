@@ -73,6 +73,10 @@ export class CmdbClient {
   private logger: Logger;
   private customFetch: typeof globalThis.fetch;
 
+  private dynamicAccessToken?: string;
+  private dynamicRefreshToken?: string;
+  private tokenExpiresAt: number = 0;
+
   constructor(
     config: CmdbMcpConfig,
     logger: Logger = defaultLogger,
@@ -83,15 +87,91 @@ export class CmdbClient {
     this.customFetch = customFetch;
   }
 
-  private buildHeaders(): Record<string, string> {
+  private async ensureToken(): Promise<string | undefined> {
+    if (this.config.cmdbApiToken) {
+      return this.config.cmdbApiToken;
+    }
+    if (!this.config.cmdbUsername || !this.config.cmdbPassword) {
+      return undefined; // Proxy mode (oma-vault)
+    }
+
+    const now = Date.now();
+    if (this.dynamicAccessToken && this.tokenExpiresAt > now + 30_000) {
+      return this.dynamicAccessToken;
+    }
+
+    // Try refresh first if we have a refresh token
+    if (this.dynamicRefreshToken) {
+      try {
+        const refreshUrl = new URL(this.config.cmdbBaseUrl + "/api/v1/auth/refresh");
+        const res = await this.customFetch(refreshUrl.toString(), {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Accept: "application/json" },
+          body: JSON.stringify({ refresh_token: this.dynamicRefreshToken }),
+        });
+        if (res.ok) {
+          const data = (await res.json()) as { access_token: string; refresh_token?: string };
+          this.dynamicAccessToken = data.access_token;
+          if (data.refresh_token) this.dynamicRefreshToken = data.refresh_token;
+          this.tokenExpiresAt = Date.now() + 3600_000;
+          return this.dynamicAccessToken;
+        }
+      } catch (err) {
+        this.logger.warn({ op: "auth.refresh_failed", err: String(err) }, "Token refresh failed, falling back to login");
+      }
+    }
+
+    // Full login with username and password
+    const loginUrl = new URL(this.config.cmdbBaseUrl + "/api/v1/auth/login");
+    const loginRes = await this.customFetch(loginUrl.toString(), {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json" },
+      body: JSON.stringify({
+        username: this.config.cmdbUsername,
+        password: this.config.cmdbPassword,
+      }),
+    });
+
+    if (!loginRes.ok) {
+      throw new CmdbClientError(
+        "CMDB_AUTH_FAILED",
+        `Admin login failed with status ${loginRes.status}`,
+        false,
+      );
+    }
+
+    const loginData = (await loginRes.json()) as {
+      access_token: string;
+      refresh_token?: string;
+      is_super_admin?: boolean;
+      tenant_name?: string;
+    };
+    this.dynamicAccessToken = loginData.access_token;
+    this.dynamicRefreshToken = loginData.refresh_token;
+    this.tokenExpiresAt = Date.now() + 3600_000;
+
+    this.logger.info(
+      {
+        op: "auth.login_ok",
+        username: this.config.cmdbUsername,
+        is_super_admin: loginData.is_super_admin,
+        tenant: loginData.tenant_name,
+      },
+      "Logged in to CMDB successfully as admin",
+    );
+
+    return this.dynamicAccessToken;
+  }
+
+  private async buildHeaders(): Promise<Record<string, string>> {
     const headers: Record<string, string> = {
       Accept: "application/json",
     };
     const headerName = this.config.cmdbAuthHeader;
     const scheme = this.config.cmdbAuthScheme;
-    const token = this.config.cmdbApiToken;
+    const token = await this.ensureToken();
 
-    // Only inject manual header if token is explicitly configured in env.
+    // Only inject manual header if token is available.
     // If empty (Vault proxy mode), the outbound request leaves clean and oma-vault transparently injects it.
     if (token) {
       if (scheme) {
@@ -116,12 +196,12 @@ export class CmdbClient {
       }
     }
 
-    const headers = this.buildHeaders();
     const maxAttempts = 2;
     let lastError: unknown;
 
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       try {
+        const headers = await this.buildHeaders();
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), this.config.requestTimeoutMs);
 
@@ -133,6 +213,12 @@ export class CmdbClient {
         clearTimeout(timer);
 
         if (res.status === 401 || res.status === 403) {
+          // If we are using username/password, invalidate dynamic token so next attempt re-authenticates
+          if (this.config.cmdbUsername && attempt < maxAttempts) {
+            this.dynamicAccessToken = undefined;
+            this.logger.warn({ path, status: res.status }, "Auth failed with cached token, re-logging in...");
+            continue;
+          }
           throw new CmdbClientError(
             "CMDB_AUTH_FAILED",
             `Authentication failed with status ${res.status}`,

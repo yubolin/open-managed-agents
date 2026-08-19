@@ -1,7 +1,9 @@
 export interface CmdbMcpConfig {
   port: number;
   cmdbBaseUrl: string;
-  cmdbApiToken: string;
+  cmdbApiToken?: string;
+  cmdbUsername?: string;
+  cmdbPassword?: string;
   cmdbAuthHeader: string;
   cmdbAuthScheme: string;
   ingressToken?: string;
@@ -13,7 +15,9 @@ export interface CmdbMcpConfig {
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): CmdbMcpConfig {
   const port = parseInt(env.PORT || "3910", 10);
   const cmdbBaseUrl = (env.CMDB_BASE_URL || "").trim().replace(/\/+$/, "");
-  const cmdbApiToken = (env.CMDB_API_TOKEN || "").trim();
+  const cmdbApiToken = (env.CMDB_API_TOKEN || "").trim() || undefined;
+  const cmdbUsername = (env.CMDB_USERNAME || "").trim() || undefined;
+  const cmdbPassword = (env.CMDB_PASSWORD || "").trim() || undefined;
   const cmdbAuthHeader = (env.CMDB_AUTH_HEADER || "Authorization").trim();
   const cmdbAuthScheme = (env.CMDB_AUTH_SCHEME !== undefined ? env.CMDB_AUTH_SCHEME : "Bearer").trim();
   const ingressToken = (env.CMDB_MCP_INGRESS_TOKEN || "").trim() || undefined;
@@ -28,15 +32,21 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): CmdbMcpConfig 
   if (!cmdbBaseUrl) {
     throw new Error("Missing required environment variable: CMDB_BASE_URL");
   }
-  // When using oma-vault (proxyUrl is set), token is injected by the vault sidecar
-  if (!cmdbApiToken && !proxyUrl) {
-    throw new Error("Missing required environment variable: CMDB_API_TOKEN (or configure HTTPS_PROXY for Vault injection)");
+
+  // Must have one of: static token, username+password, or proxyUrl
+  const hasUserPass = !!(cmdbUsername && cmdbPassword);
+  if (!cmdbApiToken && !hasUserPass && !proxyUrl) {
+    throw new Error(
+      "Must provide either CMDB_API_TOKEN, (CMDB_USERNAME and CMDB_PASSWORD), or configure HTTPS_PROXY for Vault injection",
+    );
   }
 
   return {
     port: isNaN(port) ? 3910 : port,
     cmdbBaseUrl,
     cmdbApiToken,
+    cmdbUsername,
+    cmdbPassword,
     cmdbAuthHeader,
     cmdbAuthScheme,
     ingressToken,

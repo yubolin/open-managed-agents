@@ -111,7 +111,9 @@ services:
     environment:
       PORT: "3910"
       CMDB_BASE_URL: ${CMDB_BASE_URL:-https://10.0.21.209}
-      # Scheme A (Vault mode): leave CMDB_API_TOKEN empty to let oma-vault inject the encrypted token
+      # Choose either: admin credentials, static token, or Vault proxy mode
+      CMDB_USERNAME: ${CMDB_USERNAME:-}
+      CMDB_PASSWORD: ${CMDB_PASSWORD:-}
       CMDB_API_TOKEN: ${CMDB_API_TOKEN:-}
       CMDB_AUTH_HEADER: ${CMDB_AUTH_HEADER:-Authorization}
       CMDB_AUTH_SCHEME: ${CMDB_AUTH_SCHEME:-Bearer}

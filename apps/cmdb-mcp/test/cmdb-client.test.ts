@@ -183,4 +183,59 @@ describe("CmdbClient", () => {
     );
     expect(callCount).toBe(2);
   });
+
+  it("authenticates dynamically via username and password when API token is not provided", async () => {
+    let loginCalled = false;
+    let authHeaderSeen = "";
+
+    const userPassConfig: CmdbMcpConfig = {
+      ...baseConfig,
+      cmdbApiToken: undefined,
+      cmdbUsername: "admin",
+      cmdbPassword: "supersecretpassword",
+    };
+
+    const mockFetch: typeof globalThis.fetch = async (input, init) => {
+      const url = new URL(String(input));
+      if (url.pathname === "/api/v1/auth/login") {
+        loginCalled = true;
+        const body = JSON.parse(String(init?.body || "{}"));
+        expect(body.username).toBe("admin");
+        expect(body.password).toBe("supersecretpassword");
+        return new Response(
+          JSON.stringify({
+            access_token: "dyn-jwt-token-777",
+            refresh_token: "dyn-refresh-token-888",
+            is_super_admin: true,
+            tenant_name: "global",
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      if (url.pathname === "/api/v1/assets/asset-dyn") {
+        authHeaderSeen = (init?.headers as Record<string, string>)?.[
+          "Authorization"
+        ] || "";
+        return new Response(
+          JSON.stringify({
+            id: "asset-dyn",
+            instance_name: "admin-box-1",
+            asset_type: "ecs",
+            attributes: {},
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      return new Response("{}", { status: 404 });
+    };
+
+    const client = new CmdbClient(userPassConfig, silentLogger, mockFetch);
+    const res = await client.getEntity({ entity_id: "asset-dyn" });
+
+    expect(loginCalled).toBe(true);
+    expect(authHeaderSeen).toBe("Bearer dyn-jwt-token-777");
+    expect(res.entity.entity_id).toBe("asset-dyn");
+    expect(res.entity.hostname).toBe("admin-box-1");
+  });
 });
+
