@@ -4,6 +4,7 @@ import yaml from "js-yaml";
 
 import { useApi } from "../../lib/api";
 import { Button } from "@/components/ui/button";
+import { Modal } from "../../components/Modal";
 import { Select, SelectGroup, SelectGroupLabel, SelectOption } from "../../components/Select";
 import { Combobox } from "../../components/Combobox";
 import { McpServerPickerModal } from "../../components/McpServerPickerModal";
@@ -132,6 +133,8 @@ export function AgentFormDialog({
   const [createMode, setCreateMode] = useState<"form" | "yaml" | "json">("form");
   const [codeValue, setCodeValue] = useState("");
   const [showMcpPicker, setShowMcpPicker] = useState(false);
+  const [showConfirmDiff, setShowConfirmDiff] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
 
   const createDialogRef = useRef<HTMLDivElement>(null);
   const createPreviousFocus = useRef<HTMLElement | null>(null);
@@ -261,7 +264,7 @@ export function AgentFormDialog({
   // `tools` array. Always emits exactly one toolset entry of type
   // `agent_toolset_20260401`; per-tool overrides only land in
   // `configs[]` when they differ from the default.
-  const buildToolsField = () => {
+  const buildPayload = (): Record<string, unknown> => {
     const overrides = Object.entries(form.toolOverrides)
       .filter(([, v]) => v !== "default")
       .map(([name, v]) => {
@@ -272,9 +275,6 @@ export function AgentFormDialog({
           permission_policy: { type: v as "always_allow" | "always_ask" },
         };
       });
-    // AMA spec: each entry in mcp_servers gets a corresponding mcp_toolset
-    // tool that references it by name. Surface them all as always_allow
-    // by default — the user already opted in by adding the server.
     const mcpToolsets = form.mcpServers
       .filter((m) => m.name)
       .map((m) => ({
@@ -282,7 +282,7 @@ export function AgentFormDialog({
         mcp_server_name: m.name,
         default_config: { permission_policy: { type: "always_allow" as const } },
       }));
-    return [
+    const tools = [
       {
         type: "agent_toolset_20260401",
         default_config: {
@@ -293,46 +293,71 @@ export function AgentFormDialog({
       },
       ...mcpToolsets,
     ];
+
+    const payload: Record<string, unknown> = {
+      name: form.name,
+      model: form.model,
+      system: form.system || undefined,
+      description: form.description || undefined,
+      tools,
+    };
+    if (form.mcpServers.length) payload.mcp_servers = form.mcpServers;
+    if (form.skills.length) payload.skills = form.skills;
+    if (form.callableAgents.length) {
+      payload.multiagent = { type: "coordinator", agents: form.callableAgents };
+    }
+    if (form.enableGeneralSubagent) {
+      payload.enable_general_subagent = true;
+    }
+    if (form.runtimeId && form.acpAgentId) {
+      payload._oma = {
+        harness: "acp-proxy",
+        runtime_binding: {
+          runtime_id: form.runtimeId,
+          acp_agent_id: form.acpAgentId,
+          ...(form.localSkillBlocklist.length > 0
+            ? { local_skill_blocklist: form.localSkillBlocklist }
+            : {}),
+        },
+      };
+    }
+    return payload;
   };
 
-  const create = async () => {
+  const handleSaveClick = () => {
+    if (isEdit) {
+      setShowConfirmDiff(true);
+    } else {
+      executeSave();
+    }
+  };
+
+  const executeSave = async () => {
     setCreateError("");
+    setIsSaving(true);
     try {
-      const payload: Record<string, unknown> = {
-        name: form.name,
-        model: form.model,
-        system: form.system || undefined,
-        description: form.description || undefined,
-        tools: buildToolsField(),
-      };
-      if (form.mcpServers.length) payload.mcp_servers = form.mcpServers;
-      if (form.skills.length) payload.skills = form.skills;
-      if (form.callableAgents.length) {
-        payload.multiagent = { type: "coordinator", agents: form.callableAgents };
-      }
-      if (form.enableGeneralSubagent) {
-        payload.enable_general_subagent = true;
-      }
-      // Local-runtime agent: opt into acp-proxy harness when both runtimeId
-      // and acpAgentId are set. Partial config silently falls back to the
-      // default cloud loop — same semantics as the CLI flag pair.
-      if (form.runtimeId && form.acpAgentId) {
-        payload._oma = {
-          harness: "acp-proxy",
-          runtime_binding: {
-            runtime_id: form.runtimeId,
-            acp_agent_id: form.acpAgentId,
-            ...(form.localSkillBlocklist.length > 0
-              ? { local_skill_blocklist: form.localSkillBlocklist }
-              : {}),
-          },
-        };
+      let payload: Record<string, unknown>;
+      if (createMode === "form") {
+        payload = buildPayload();
+      } else {
+        const parsed =
+          createMode === "yaml"
+            ? (yaml.load(codeValue) as Record<string, unknown>)
+            : JSON.parse(codeValue);
+        if (!parsed.name) {
+          setCreateError("name is required");
+          setIsSaving(false);
+          return;
+        }
+        if (!parsed.tools) parsed.tools = [{ type: "agent_toolset_20260401" }];
+        payload = parsed;
       }
 
       const savedAgent = await api<Agent>(isEdit ? `/v1/agents/${agent.id}` : "/v1/agents", {
         method: isEdit ? "PUT" : "POST",
         body: JSON.stringify(payload),
       });
+      setShowConfirmDiff(false);
       closeCreate();
       onCreated?.();
       if (!isEdit) {
@@ -340,6 +365,8 @@ export function AgentFormDialog({
       }
     } catch (e: any) {
       setCreateError(e?.message || `Failed to ${isEdit ? "update" : "create"} agent`);
+    } finally {
+      setIsSaving(false);
     }
   };
 
@@ -842,11 +869,11 @@ export function AgentFormDialog({
                     Cancel
                   </Button>
                   {createMode === "form" ? (
-                    <Button onClick={create} disabled={!form.name}>
+                    <Button onClick={handleSaveClick} disabled={!form.name}>
                       {isEdit ? "Save Changes" : "Create Agent"}
                     </Button>
                   ) : (
-                    <Button onClick={createFromCode} disabled={!codeValue.trim()}>
+                    <Button onClick={handleSaveClick} disabled={!codeValue.trim()}>
                       {isEdit ? "Save Changes" : "Create Agent"}
                     </Button>
                   )}
@@ -856,6 +883,36 @@ export function AgentFormDialog({
           )}
         </div>
       </div>
+
+      {/* Confirmation & Visual Diff Modal before applying edit */}
+      {showConfirmDiff && agent && (
+        <Modal
+          open={showConfirmDiff}
+          onClose={() => !isSaving && setShowConfirmDiff(false)}
+          title="确认发布新版本？"
+          subtitle={`当前版本 v${agent.version} 将生成新版本 v${agent.version + 1}。`}
+          maxWidth="max-w-lg"
+          footer={
+            <div className="flex justify-end gap-2 w-full">
+              <Button
+                variant="outline"
+                disabled={isSaving}
+                onClick={() => setShowConfirmDiff(false)}
+              >
+                返回修改
+              </Button>
+              <Button
+                disabled={isSaving}
+                onClick={executeSave}
+              >
+                {isSaving ? "正在保存..." : `确认发布 v${agent.version + 1}`}
+              </Button>
+            </div>
+          }
+        >
+          <AgentDiffSummary agent={agent} form={form} />
+        </Modal>
+      )}
 
       {/* MCP server registry picker — same MCP_REGISTRY the vault page uses */}
       <McpServerPickerModal
@@ -868,6 +925,143 @@ export function AgentFormDialog({
         alreadyAddedUrls={form.mcpServers.map((m) => m.url)}
       />
     </>
+  );
+}
+
+function AgentDiffSummary({
+  agent,
+  form,
+}: {
+  agent: Agent;
+  form: FormState;
+}) {
+  const oldModel = typeof agent.model === "string" ? agent.model : agent.model?.id;
+  const oldSkills = (agent.skills || []).map((s: any) => s.skill_id || s.id);
+  const newSkills = form.skills.map((s) => s.skill_id);
+
+  const addedSkills = newSkills.filter((s) => !oldSkills.includes(s));
+  const removedSkills = oldSkills.filter((s) => !newSkills.includes(s));
+
+  const oldMcps = (agent.mcp_servers || []).map((m: any) => m.name);
+  const newMcps = form.mcpServers.map((m) => m.name).filter(Boolean);
+
+  const addedMcps = newMcps.filter((m) => !oldMcps.includes(m));
+  const removedMcps = oldMcps.filter((m) => !newMcps.includes(m));
+
+  const isNameChanged = agent.name !== form.name;
+  const isModelChanged = oldModel !== form.model;
+  const isSystemChanged = (agent.system || "") !== form.system;
+  const isDescChanged = (agent.description || "") !== form.description;
+
+  const hasAnyChanges =
+    isNameChanged ||
+    isModelChanged ||
+    isSystemChanged ||
+    isDescChanged ||
+    addedSkills.length > 0 ||
+    removedSkills.length > 0 ||
+    addedMcps.length > 0 ||
+    removedMcps.length > 0;
+
+  return (
+    <div className="space-y-4 text-sm">
+      <div className="flex items-center justify-between p-3 bg-bg-surface border border-border rounded-lg">
+        <div className="text-xs text-fg-muted font-medium">版本演进</div>
+        <div className="flex items-center gap-2 font-mono">
+          <span className="px-2 py-0.5 bg-bg border border-border rounded text-fg-muted text-xs">
+            v{agent.version} (当前)
+          </span>
+          <span className="text-fg-subtle">➔</span>
+          <span className="px-2 py-0.5 bg-brand text-brand-fg font-semibold rounded text-xs">
+            v{agent.version + 1} (新版本)
+          </span>
+        </div>
+      </div>
+
+      <div className="space-y-2.5">
+        <div className="text-xs font-semibold text-fg-muted uppercase tracking-wider">变更摘要</div>
+
+        {!hasAnyChanges && (
+          <div className="text-xs text-fg-subtle p-3 rounded bg-bg border border-border text-center">
+            未检测到配置变动（将生成新的快照版本 v{agent.version + 1}）
+          </div>
+        )}
+
+        {isNameChanged && (
+          <div className="flex items-center justify-between p-2 rounded bg-bg border border-border">
+            <span className="text-fg-muted text-xs">智能体名称</span>
+            <span className="font-mono text-xs">
+              <del className="text-danger mr-2">{agent.name}</del>
+              <ins className="text-success no-underline">{form.name}</ins>
+            </span>
+          </div>
+        )}
+
+        {isModelChanged && (
+          <div className="flex items-center justify-between p-2 rounded bg-bg border border-border">
+            <span className="text-fg-muted text-xs">模型变更</span>
+            <span className="font-mono text-xs">
+              <del className="text-danger mr-2">{oldModel}</del>
+              <ins className="text-success no-underline">{form.model}</ins>
+            </span>
+          </div>
+        )}
+
+        {isSystemChanged && (
+          <div className="flex items-center justify-between p-2 rounded bg-bg border border-border">
+            <span className="text-fg-muted text-xs">系统提示词 (System Prompt)</span>
+            <span className="text-xs text-brand font-medium">已修改</span>
+          </div>
+        )}
+
+        {isDescChanged && (
+          <div className="flex items-center justify-between p-2 rounded bg-bg border border-border">
+            <span className="text-fg-muted text-xs">描述信息</span>
+            <span className="text-xs text-brand font-medium">已修改</span>
+          </div>
+        )}
+
+        {(addedSkills.length > 0 || removedSkills.length > 0) && (
+          <div className="p-2.5 rounded bg-bg border border-border space-y-1.5">
+            <span className="text-fg-muted block text-xs">技能 (Skills) 变动:</span>
+            <div className="flex flex-wrap gap-1.5">
+              {addedSkills.map((s) => (
+                <span key={s} className="px-2 py-0.5 rounded bg-success-subtle text-success text-xs font-mono">
+                  + {s}
+                </span>
+              ))}
+              {removedSkills.map((s) => (
+                <span key={s} className="px-2 py-0.5 rounded bg-danger-subtle text-danger text-xs font-mono">
+                  - {s}
+                </span>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {(addedMcps.length > 0 || removedMcps.length > 0) && (
+          <div className="p-2.5 rounded bg-bg border border-border space-y-1.5">
+            <span className="text-fg-muted block text-xs">MCP 服务变动:</span>
+            <div className="flex flex-wrap gap-1.5">
+              {addedMcps.map((m) => (
+                <span key={m} className="px-2 py-0.5 rounded bg-success-subtle text-success text-xs font-mono">
+                  + {m}
+                </span>
+              ))}
+              {removedMcps.map((m) => (
+                <span key={m} className="px-2 py-0.5 rounded bg-danger-subtle text-danger text-xs font-mono">
+                  - {m}
+                </span>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+
+      <div className="text-xs text-fg-subtle pt-2 border-t border-border/50">
+        💡 提示：确认保存后将自动升级为 <strong>v{agent.version + 1}</strong> 并作为后续会话的默认版本；现有会话将不受影响。
+      </div>
+    </div>
   );
 }
 
