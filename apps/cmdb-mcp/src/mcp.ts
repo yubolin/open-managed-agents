@@ -126,6 +126,18 @@ export async function handleMcpJsonRpc(
           resultData = await client.getRelationships(args as Parameters<CmdbClient["getRelationships"]>[0]);
           break;
         }
+        case "list_tenants": {
+          resultData = await client.listTenants(args as Parameters<CmdbClient["listTenants"]>[0]);
+          break;
+        }
+        case "list_asset_types": {
+          resultData = await client.listAssetTypes(args as Parameters<CmdbClient["listAssetTypes"]>[0]);
+          break;
+        }
+        case "get_asset_stats": {
+          resultData = await client.getAssetStats(args as Parameters<CmdbClient["getAssetStats"]>[0]);
+          break;
+        }
         default:
           return {
             status: 200,

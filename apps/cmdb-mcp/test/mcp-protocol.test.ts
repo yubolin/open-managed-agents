@@ -182,7 +182,7 @@ describe("MCP Protocol End-to-End with @ai-sdk/mcp", () => {
       });
       expect(authRes.status).toBe(200);
       const data = await authRes.json();
-      expect(data.result.tools).toHaveLength(3);
+      expect(data.result.tools).toHaveLength(6);
     } finally {
       await new Promise<void>((resolve) => authedServer.close(() => resolve()));
     }

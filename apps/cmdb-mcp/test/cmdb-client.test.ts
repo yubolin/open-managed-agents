@@ -237,5 +237,85 @@ describe("CmdbClient", () => {
     expect(res.entity.entity_id).toBe("asset-dyn");
     expect(res.entity.hostname).toBe("admin-box-1");
   });
+
+  it("lists and filters tenants via listTenants", async () => {
+    const mockFetch: typeof globalThis.fetch = async (input) => {
+      const url = new URL(String(input));
+      if (url.pathname === "/api/v1/auth/tenants") {
+        return new Response(
+          JSON.stringify([
+            { tenant_id: "shiseido", tenant_name: "资生堂" },
+            { tenant_id: "szsm", tenant_name: "神州数码" },
+            { tenant_id: "hitachi", tenant_name: "日立" },
+          ]),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      return new Response("{}", { status: 404 });
+    };
+
+    const client = new CmdbClient(baseConfig, silentLogger, mockFetch);
+    const all = await client.listTenants();
+    expect(all.total).toBe(3);
+
+    const filtered = await client.listTenants({ query: "资生堂" });
+    expect(filtered.total).toBe(1);
+    expect(filtered.tenants[0].tenant_id).toBe("shiseido");
+  });
+
+  it("lists asset types via listAssetTypes", async () => {
+    const mockFetch: typeof globalThis.fetch = async (input) => {
+      const url = new URL(String(input));
+      if (url.pathname === "/api/v1/assets/types") {
+        return new Response(
+          JSON.stringify({
+            items: ["ecs", "rds", "vpc", "acl"],
+            options: [
+              { value: "ecs", asset_class: "core" },
+              { value: "rds", asset_class: "core" },
+              { value: "vpc", asset_class: "core" },
+              { value: "acl", asset_class: "platform" },
+            ],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      return new Response("{}", { status: 404 });
+    };
+
+    const client = new CmdbClient(baseConfig, silentLogger, mockFetch);
+    const all = await client.listAssetTypes();
+    expect(all.total).toBe(4);
+
+    const core = await client.listAssetTypes({ asset_class: "core" });
+    expect(core.total).toBe(3);
+    expect(core.types.map((t) => t.type)).toEqual(["ecs", "rds", "vpc"]);
+  });
+
+  it("retrieves dashboard stats via getAssetStats", async () => {
+    const mockFetch: typeof globalThis.fetch = async (input) => {
+      const url = new URL(String(input));
+      if (url.pathname === "/api/v1/dashboard/stats") {
+        return new Response(
+          JSON.stringify({
+            total_assets: 400,
+            by_type: { ecs: 28, rds: 1 },
+            by_vendor: { azure: 281, aws: 92, aliyun: 27 },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      return new Response("{}", { status: 404 });
+    };
+
+    const client = new CmdbClient(baseConfig, silentLogger, mockFetch);
+    const stats = (await client.getAssetStats()) as {
+      total_assets: number;
+      by_type: Record<string, number>;
+    };
+    expect(stats.total_assets).toBe(400);
+    expect(stats.by_type.ecs).toBe(28);
+  });
 });
+
 

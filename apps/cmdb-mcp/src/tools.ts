@@ -78,4 +78,56 @@ export const CMDB_TOOLS: ToolDescriptor[] = [
       required: ["entity_id"],
     },
   },
+  {
+    name: "list_tenants",
+    description: "List all enterprise tenants registered in CMDB with their tenant ID, display name, and role.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        query: {
+          type: "string",
+          description: "Optional keyword to filter tenants by name or ID",
+        },
+      },
+    },
+  },
+  {
+    name: "list_asset_types",
+    description: "List all CI asset categories and ledger types available in CMDB (e.g. ecs, rds, vpc, security_group, oss, public_ip, certificate) with their asset class.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        asset_class: {
+          type: "string",
+          enum: ["core", "platform"],
+          description: "Filter by asset class: 'core' (compute/storage/network) or 'platform' (PaaS/governance)",
+        },
+      },
+    },
+  },
+  {
+    name: "get_asset_stats",
+    description: "Get global aggregate statistics and breakdown counts of CMDB assets. Returns total asset count, counts by asset type (ecs, rds, etc.), counts by cloud vendor (aliyun, aws, azure), counts by status (running, stopped), and counts by region.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        tenant_id: {
+          type: "string",
+          description: "Optional tenant ID to filter stats for a specific tenant",
+        },
+        asset_type: {
+          type: "string",
+          description: "Optional asset type (e.g. 'ecs', 'rds', 'vpc') to count",
+        },
+        vendor: {
+          type: "string",
+          description: "Optional cloud vendor ('aliyun', 'aws', 'azure')",
+        },
+        status: {
+          type: "string",
+          description: "Optional status ('running', 'stopped', 'available')",
+        },
+      },
+    },
+  },
 ];

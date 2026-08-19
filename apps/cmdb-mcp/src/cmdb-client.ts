@@ -481,4 +481,96 @@ export class CmdbClient {
 
     return { relationships: relations };
   }
+
+  async listTenants(opts?: { query?: string }): Promise<{
+    tenants: Array<{ tenant_id: string; tenant_name: string; role?: string }>;
+    total: number;
+  }> {
+    const rawList = await this.request<
+      Array<{ tenant_id: string; tenant_name: string; role?: string }>
+    >("/api/v1/auth/tenants");
+
+    let tenants = Array.isArray(rawList) ? rawList : [];
+
+    if (opts?.query) {
+      const q = opts.query.toLowerCase();
+      tenants = tenants.filter(
+        (t) =>
+          t.tenant_id.toLowerCase().includes(q) ||
+          (t.tenant_name && t.tenant_name.toLowerCase().includes(q)),
+      );
+    }
+
+    return {
+      tenants,
+      total: tenants.length,
+    };
+  }
+
+  async listAssetTypes(opts?: { asset_class?: "core" | "platform" }): Promise<{
+    types: Array<{ type: string; asset_class: string }>;
+    total: number;
+  }> {
+    const raw = await this.request<{
+      items?: string[];
+      options?: Array<{ value: string; asset_class: string }>;
+    }>("/api/v1/assets/types");
+
+    let types: Array<{ type: string; asset_class: string }> = [];
+
+    if (raw.options && Array.isArray(raw.options)) {
+      types = raw.options.map((o) => ({
+        type: o.value,
+        asset_class: o.asset_class || "platform",
+      }));
+    } else if (raw.items && Array.isArray(raw.items)) {
+      types = raw.items.map((t) => ({
+        type: t,
+        asset_class: "platform",
+      }));
+    }
+
+    if (opts?.asset_class) {
+      types = types.filter((t) => t.asset_class === opts.asset_class);
+    }
+
+    return {
+      types,
+      total: types.length,
+    };
+  }
+
+  async getAssetStats(opts?: {
+    tenant_id?: string;
+    asset_type?: string;
+    vendor?: string;
+    status?: string;
+  }): Promise<Record<string, unknown>> {
+    // If specific filters are provided (e.g. single tenant or single asset_type), query /api/v1/assets/ count
+    if (opts?.tenant_id || opts?.asset_type || opts?.vendor || opts?.status) {
+      const queryParams: Record<string, string | number | boolean | undefined> = {
+        page_size: 1,
+        page: 1,
+      };
+      if (opts.tenant_id) queryParams.tenant_id = opts.tenant_id;
+      if (opts.asset_type) queryParams.asset_type = opts.asset_type;
+      if (opts.vendor) queryParams.vendor = opts.vendor;
+      if (opts.status) queryParams.status = opts.status;
+
+      const filtered = await this.request<{ total?: number; items?: unknown[] }>(
+        "/api/v1/assets/",
+        queryParams,
+      );
+
+      return {
+        filter: opts,
+        count: filtered.total ?? 0,
+      };
+    }
+
+    // Global stats from /api/v1/dashboard/stats
+    const dashboard = await this.request<Record<string, unknown>>("/api/v1/dashboard/stats");
+    return dashboard;
+  }
 }
+
