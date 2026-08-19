@@ -979,6 +979,35 @@ v1.route("/evals", buildEvalRoutes({
   environments: environmentsService,
 }));
 
+v1.get("/stats", async (c) => {
+  const tenantId = c.get("tenant_id") || "default";
+  const [
+    agents,
+    sessions,
+    environments,
+    vaults,
+    modelCardsList,
+    apiKeysList,
+  ] = await Promise.all([
+    agentsService.count({ tenantId }).catch(() => 0),
+    sessionsService.count({ tenantId }).catch(() => 0),
+    environmentsService.count({ tenantId }).catch(() => 0),
+    vaultService.count({ tenantId }).catch(() => 0),
+    modelCardsService.list({ tenantId }).catch(() => []),
+    apiKeyStorage.listByTenant(tenantId).catch(() => []),
+  ]);
+
+  return c.json({
+    agents: typeof agents === "number" ? agents : 0,
+    sessions: typeof sessions === "number" ? sessions : 0,
+    environments: typeof environments === "number" ? environments : 0,
+    vaults: typeof vaults === "number" ? vaults : 0,
+    skills: 0,
+    model_cards: Array.isArray(modelCardsList) ? modelCardsList.length : 0,
+    api_keys: Array.isArray(apiKeysList) ? apiKeysList.length : 0,
+  });
+});
+
 // Stubs for routes the console hits but main-node doesn't yet implement.
 v1.get("/runtimes", (c) => c.json({ data: [] }));
 v1.get("/skills", (c) => c.json({ data: [] }));
