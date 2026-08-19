@@ -118,6 +118,10 @@ services:
       CMDB_AUTH_HEADER: ${CMDB_AUTH_HEADER:-Authorization}
       CMDB_AUTH_SCHEME: ${CMDB_AUTH_SCHEME:-Bearer}
       CMDB_MCP_INGRESS_TOKEN: ${CMDB_MCP_INGRESS_TOKEN:-}
+      CMDB_DB_URL: ${CMDB_DB_URL:-}
+      CMDB_DB_TYPE: ${CMDB_DB_TYPE:-auto}
+      CMDB_SQL_MAX_ROWS: ${CMDB_SQL_MAX_ROWS:-200}
+      CMDB_SQL_TIMEOUT_MS: ${CMDB_SQL_TIMEOUT_MS:-10000}
       # Vault outbound proxy
       HTTPS_PROXY: http://oma-vault:14322
       HTTP_PROXY: http://oma-vault:14322

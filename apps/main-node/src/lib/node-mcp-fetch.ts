@@ -24,7 +24,12 @@ export function createNodeMcpFetch(): (server: {
       // Cloudflare workerd / edge compat: normalize redirect: "error" -> "manual"
       const redirect = init?.redirect === "error" ? "manual" : init?.redirect;
 
-      return globalThis.fetch(input, {
+      let targetInput: string | URL | Request = input;
+      if (typeof input === "string" && input.includes("oma-cmdb-mcp:")) {
+        targetInput = input.replace("//oma-cmdb-mcp:3910", "//127.0.0.1:3910");
+      }
+
+      return globalThis.fetch(targetInput, {
         ...init,
         headers,
         ...(redirect ? { redirect } : {}),

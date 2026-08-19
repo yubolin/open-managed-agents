@@ -316,6 +316,21 @@ describe("CmdbClient", () => {
     expect(stats.total_assets).toBe(400);
     expect(stats.by_type.ecs).toBe(28);
   });
+
+  it("reflects tables and schema via describeTables and describeColumns (API fallback)", async () => {
+    const client = new CmdbClient(baseConfig, silentLogger, async () => new Response("{}", { status: 404 }));
+    
+    const tables = await client.describeTables();
+    expect(tables.total).toBeGreaterThan(3);
+    expect(tables.tables.map((t) => t.table_name)).toContain("assets");
+    expect(tables.tables.map((t) => t.table_name)).toContain("tenants");
+
+    const columns = await client.describeColumns({ table_name: "assets" });
+    expect(columns.table_name).toBe("assets");
+    expect(columns.columns.length).toBeGreaterThan(5);
+    expect(columns.columns.find((c) => c.column_name === "id")?.is_primary_key).toBe(true);
+    expect(columns.columns.find((c) => c.column_name === "tenant_id")).toBeDefined();
+  });
 });
 
 

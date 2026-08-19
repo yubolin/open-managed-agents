@@ -6,6 +6,10 @@ export interface CmdbMcpConfig {
   cmdbPassword?: string;
   cmdbAuthHeader: string;
   cmdbAuthScheme: string;
+  cmdbDbUrl?: string;
+  cmdbDbType?: "auto" | "postgres" | "mysql" | "sqlite";
+  maxSqlRows: number;
+  sqlTimeoutMs: number;
   ingressToken?: string;
   proxyUrl?: string;
   logLevel: "debug" | "info" | "warn" | "error";
@@ -20,6 +24,14 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): CmdbMcpConfig 
   const cmdbPassword = (env.CMDB_PASSWORD || "").trim() || undefined;
   const cmdbAuthHeader = (env.CMDB_AUTH_HEADER || "Authorization").trim();
   const cmdbAuthScheme = (env.CMDB_AUTH_SCHEME !== undefined ? env.CMDB_AUTH_SCHEME : "Bearer").trim();
+  const cmdbDbUrl = (env.CMDB_DB_URL || "").trim() || undefined;
+  const rawDbType = (env.CMDB_DB_TYPE || "auto").toLowerCase();
+  const cmdbDbType: CmdbMcpConfig["cmdbDbType"] =
+    rawDbType === "postgres" || rawDbType === "mysql" || rawDbType === "sqlite"
+      ? rawDbType
+      : "auto";
+  const maxSqlRows = parseInt(env.CMDB_SQL_MAX_ROWS || "200", 10);
+  const sqlTimeoutMs = parseInt(env.CMDB_SQL_TIMEOUT_MS || "10000", 10);
   const ingressToken = (env.CMDB_MCP_INGRESS_TOKEN || "").trim() || undefined;
   const proxyUrl = (env.HTTPS_PROXY || env.https_proxy || env.HTTP_PROXY || env.http_proxy || "").trim() || undefined;
   const rawLogLevel = (env.LOG_LEVEL || "info").toLowerCase();
@@ -49,6 +61,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): CmdbMcpConfig 
     cmdbPassword,
     cmdbAuthHeader,
     cmdbAuthScheme,
+    cmdbDbUrl,
+    cmdbDbType,
+    maxSqlRows: isNaN(maxSqlRows) ? 200 : maxSqlRows,
+    sqlTimeoutMs: isNaN(sqlTimeoutMs) ? 10000 : sqlTimeoutMs,
     ingressToken,
     proxyUrl,
     logLevel,

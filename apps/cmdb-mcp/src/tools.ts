@@ -130,4 +130,49 @@ export const CMDB_TOOLS: ToolDescriptor[] = [
       },
     },
   },
+  {
+    name: "describe_tables",
+    description: "List all database tables and asset ledgers available in CMDB with their comments and estimated row counts.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        query: {
+          type: "string",
+          description: "Optional keyword to filter tables by name or comment",
+        },
+      },
+    },
+  },
+  {
+    name: "describe_columns",
+    description: "Inspect detailed column definitions and schema of a specific CMDB table (column names, types, comments, primary keys, and JSON attributes).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        table_name: {
+          type: "string",
+          description: "Target table name to inspect (e.g. 'assets', 'relations', 'tenants')",
+        },
+      },
+      required: ["table_name"],
+    },
+  },
+  {
+    name: "execute_read_only_sql",
+    description: "Execute a read-only SQL query (SELECT / WITH / EXPLAIN) against CMDB database for advanced multi-table joins, groupings, and aggregation analysis.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        sql: {
+          type: "string",
+          description: "The read-only SQL query to execute (strictly SELECT / WITH queries only)",
+        },
+        limit: {
+          type: "integer",
+          description: "Maximum number of rows to return (default 200, max 1000)",
+        },
+      },
+      required: ["sql"],
+    },
+  },
 ];

@@ -138,6 +138,18 @@ export async function handleMcpJsonRpc(
           resultData = await client.getAssetStats(args as Parameters<CmdbClient["getAssetStats"]>[0]);
           break;
         }
+        case "describe_tables": {
+          resultData = await client.describeTables(args as Parameters<CmdbClient["describeTables"]>[0]);
+          break;
+        }
+        case "describe_columns": {
+          resultData = await client.describeColumns(args as Parameters<CmdbClient["describeColumns"]>[0]);
+          break;
+        }
+        case "execute_read_only_sql": {
+          resultData = await client.executeReadOnlySql(args as Parameters<CmdbClient["executeReadOnlySql"]>[0]);
+          break;
+        }
         default:
           return {
             status: 200,

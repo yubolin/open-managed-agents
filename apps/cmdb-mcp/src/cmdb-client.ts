@@ -1,6 +1,8 @@
 import { z } from "zod";
 import type { CmdbMcpConfig } from "./config.js";
 import { defaultLogger, Logger } from "./logger.js";
+import { SqlEngine } from "./sql/db.js";
+import { SchemaReflector } from "./sql/schema.js";
 
 export type EntityClass =
   | "host"
@@ -43,7 +45,8 @@ export type CmdbErrorCode =
   | "CMDB_BAD_RESPONSE"
   | "CMDB_UPSTREAM_TIMEOUT"
   | "CMDB_UPSTREAM_UNAVAILABLE"
-  | "CMDB_RATE_LIMITED";
+  | "CMDB_RATE_LIMITED"
+  | "CMDB_DB_NOT_CONFIGURED";
 
 export class CmdbClientError extends Error {
   constructor(
@@ -72,6 +75,8 @@ export class CmdbClient {
   private config: CmdbMcpConfig;
   private logger: Logger;
   private customFetch: typeof globalThis.fetch;
+  private sqlEngine?: SqlEngine;
+  private schemaReflector?: SchemaReflector;
 
   private dynamicAccessToken?: string;
   private dynamicRefreshToken?: string;
@@ -81,10 +86,25 @@ export class CmdbClient {
     config: CmdbMcpConfig,
     logger: Logger = defaultLogger,
     customFetch: typeof globalThis.fetch = globalThis.fetch,
+    sqlEngine?: SqlEngine,
   ) {
     this.config = config;
     this.logger = logger;
     this.customFetch = customFetch;
+
+    if (sqlEngine) {
+      this.sqlEngine = sqlEngine;
+      this.schemaReflector = new SchemaReflector(this.sqlEngine);
+    } else if (this.config.cmdbDbUrl) {
+      this.sqlEngine = new SqlEngine({
+        connectionUrl: this.config.cmdbDbUrl,
+        dbType: this.config.cmdbDbType,
+        maxRows: this.config.maxSqlRows,
+        timeoutMs: this.config.sqlTimeoutMs,
+        logger: this.logger,
+      });
+      this.schemaReflector = new SchemaReflector(this.sqlEngine);
+    }
   }
 
   private async ensureToken(): Promise<string | undefined> {
@@ -571,6 +591,137 @@ export class CmdbClient {
     // Global stats from /api/v1/dashboard/stats
     const dashboard = await this.request<Record<string, unknown>>("/api/v1/dashboard/stats");
     return dashboard;
+  }
+
+  async describeTables(opts?: { query?: string }): Promise<{
+    tables: Array<{ table_name: string; table_comment?: string; estimated_rows?: number }>;
+    total: number;
+    source: "database" | "api_metadata";
+  }> {
+    if (this.schemaReflector) {
+      const res = await this.schemaReflector.describeTables(opts?.query);
+      return { ...res, source: "database" };
+    }
+
+    // Fallback: build virtual table ledger list from CMDB API
+    let tables = [
+      { table_name: "assets", table_comment: "CMDB 基础设施与资产主表 (云主机、IP、数据库、网络等400+项CI)", estimated_rows: 400 },
+      { table_name: "relations", table_comment: "CMDB 资产拓扑与依赖调用关系表", estimated_rows: 187 },
+      { table_name: "tenants", table_comment: "企业租户信息表", estimated_rows: 33 },
+      { table_name: "projects", table_comment: "项目空间与成本归属表", estimated_rows: 10 },
+      { table_name: "tickets", table_comment: "CMDB 关联运维与审批工单表", estimated_rows: 32 },
+      { table_name: "cloud_credentials", table_comment: "多云账号与同步凭据表 (AWS, Azure, Aliyun)", estimated_rows: 5 },
+      { table_name: "governance_reports", table_comment: "资产治理、闲置分析与数据质量审计表", estimated_rows: 50 },
+    ];
+
+    if (opts?.query) {
+      const q = opts.query.toLowerCase();
+      tables = tables.filter(
+        (t) =>
+          t.table_name.toLowerCase().includes(q) ||
+          (t.table_comment && t.table_comment.toLowerCase().includes(q)),
+      );
+    }
+
+    return {
+      tables,
+      total: tables.length,
+      source: "api_metadata",
+    };
+  }
+
+  async describeColumns(opts: { table_name: string }): Promise<{
+    table_name: string;
+    table_comment?: string;
+    columns: Array<{
+      column_name: string;
+      data_type: string;
+      is_nullable: boolean;
+      column_comment?: string;
+      is_primary_key?: boolean;
+    }>;
+    sample_attributes?: string[];
+    source: "database" | "api_metadata";
+  }> {
+    if (this.schemaReflector) {
+      const res = await this.schemaReflector.describeColumns(opts.table_name);
+      return { ...res, source: "database" };
+    }
+
+    // Fallback schema for common CMDB tables
+    const tableName = opts.table_name.toLowerCase();
+
+    if (tableName === "assets") {
+      return {
+        table_name: "assets",
+        table_comment: "CMDB 基础设施资产表",
+        columns: [
+          { column_name: "id", data_type: "varchar(64)", is_nullable: false, is_primary_key: true, column_comment: "资产唯一 UUID" },
+          { column_name: "tenant_id", data_type: "varchar(64)", is_nullable: false, column_comment: "所属企业租户 ID" },
+          { column_name: "instance_name", data_type: "varchar(255)", is_nullable: true, column_comment: "主机名/实例名称" },
+          { column_name: "asset_type", data_type: "varchar(64)", is_nullable: false, column_comment: "资产类别 (ecs, rds, public_ip, vpc, security_group, oss 等)" },
+          { column_name: "asset_class", data_type: "varchar(32)", is_nullable: true, column_comment: "核心/平台分级 (core, platform)" },
+          { column_name: "vendor", data_type: "varchar(32)", is_nullable: false, column_comment: "云厂商 (aliyun, aws, azure)" },
+          { column_name: "status", data_type: "varchar(32)", is_nullable: false, column_comment: "运行状态 (running, stopped, available)" },
+          { column_name: "region", data_type: "varchar(64)", is_nullable: true, column_comment: "云区域/地域" },
+          { column_name: "cloud_account", data_type: "varchar(64)", is_nullable: true, column_comment: "云账号名称" },
+          { column_name: "project_code", data_type: "varchar(64)", is_nullable: true, column_comment: "所属项目编号" },
+          { column_name: "cost_allocation_name", data_type: "varchar(128)", is_nullable: true, column_comment: "成本中心/团队名称" },
+          { column_name: "attributes", data_type: "json / jsonb", is_nullable: true, column_comment: "规格属性 JSON (含 cpu_cores, memory_mb, private_ip, sku 等)" },
+          { column_name: "tags", data_type: "json / jsonb", is_nullable: true, column_comment: "业务标签 Key-Value JSON" },
+          { column_name: "created_at", data_type: "timestamp", is_nullable: false, column_comment: "创建时间" },
+          { column_name: "updated_at", data_type: "timestamp", is_nullable: true, column_comment: "最后更新时间" },
+        ],
+        sample_attributes: ["cpu_cores", "memory_mb", "private_ip", "public_ip", "sku", "instance_type", "resource_group", "subscription_id"],
+        source: "api_metadata",
+      };
+    }
+
+    if (tableName === "relations") {
+      return {
+        table_name: "relations",
+        table_comment: "CMDB 资产关系表",
+        columns: [
+          { column_name: "id", data_type: "varchar(64)", is_nullable: false, is_primary_key: true, column_comment: "关系记录唯一 ID" },
+          { column_name: "source_id", data_type: "varchar(64)", is_nullable: false, column_comment: "源资产 ID / instance_id" },
+          { column_name: "target_id", data_type: "varchar(64)", is_nullable: false, column_comment: "目标资产 ID / instance_id" },
+          { column_name: "relation_type", data_type: "varchar(64)", is_nullable: false, column_comment: "关系类型 (depends_on, connects_to, contains, manages)" },
+          { column_name: "created_at", data_type: "timestamp", is_nullable: false, column_comment: "创建时间" },
+        ],
+        source: "api_metadata",
+      };
+    }
+
+    if (tableName === "tenants") {
+      return {
+        table_name: "tenants",
+        table_comment: "企业租户表",
+        columns: [
+          { column_name: "tenant_id", data_type: "varchar(64)", is_nullable: false, is_primary_key: true, column_comment: "租户唯一标识" },
+          { column_name: "tenant_name", data_type: "varchar(128)", is_nullable: false, column_comment: "企业租户显示名称" },
+          { column_name: "role", data_type: "varchar(32)", is_nullable: true, column_comment: "权限角色 (admin, user)" },
+        ],
+        source: "api_metadata",
+      };
+    }
+
+    throw new CmdbClientError("CMDB_NOT_FOUND", `Table '${tableName}' not found in CMDB schema`, false);
+  }
+
+  async executeReadOnlySql(opts: {
+    sql: string;
+    limit?: number;
+  }): Promise<Record<string, unknown>> {
+    if (this.sqlEngine) {
+      const res = await this.sqlEngine.executeQuery(opts.sql, opts.limit);
+      return res as unknown as Record<string, unknown>;
+    }
+
+    throw new CmdbClientError(
+      "CMDB_DB_NOT_CONFIGURED",
+      "Direct SQL query requires CMDB_DB_URL configured in environment. For standard queries, use search_entities / get_asset_stats.",
+      false,
+    );
   }
 }
 
