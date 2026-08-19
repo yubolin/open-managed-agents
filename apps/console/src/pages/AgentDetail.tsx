@@ -1,5 +1,6 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { useParams, Link, useNavigate } from "react-router";
+import { useQueryClient } from "@tanstack/react-query";
 import { useApi } from "../lib/api";
 import { useApiQuery } from "../lib/useApiQuery";
 import { FeishuIcon, GitHubIcon, LinearIcon, SlackIcon } from "../components/icons";
@@ -7,6 +8,7 @@ import { Page } from "../components/Page";
 import { PageHeader } from "../components/PageHeader";
 import { Button } from "@/components/ui/button";
 import type { AgentRecord as Agent } from "../types/agent";
+import { AgentFormDialog } from "./agents/AgentFormDialog";
 
 /** Shared publication shape across Linear / GitHub / Slack — they all
  *  expose the same id / status / mode / persona / workspace_name fields. */
@@ -22,6 +24,8 @@ export function AgentDetail() {
   const { id } = useParams();
   const { api } = useApi();
   const nav = useNavigate();
+  const queryClient = useQueryClient();
+  const [showEdit, setShowEdit] = useState(false);
 
   // Single-resource fetches via TQ. `enabled: !!id` defers until the route
   // param is available; the publication queries inherit the same gate.
@@ -39,6 +43,12 @@ export function AgentDetail() {
     undefined,
     { enabled },
   );
+  const { data: skillsRes } = useApiQuery<{ data: Array<{ id: string; name: string; description: string }> }>(
+    "/v1/skills",
+  );
+  const { data: modelCardsRes } = useApiQuery<{ data: any[] }>("/v1/model_cards");
+  const { data: allAgentsRes } = useApiQuery<{ data: Agent[] }>("/v1/agents");
+
   // Reverse-lookup publications per provider. Each endpoint exists thanks
   // to the /linear/agents/:id/publications + /slack/agents/:id/publications
   // + /github/agents/:id/publications routes added on the main worker.
@@ -108,6 +118,9 @@ export function AgentDetail() {
           title={agent.name}
           actions={
             <>
+              <Button variant="outline" size="sm" onClick={() => setShowEdit(true)}>
+                Edit
+              </Button>
               <Button variant="outline" size="sm" onClick={archive}>
                 Archive
               </Button>
@@ -138,6 +151,18 @@ export function AgentDetail() {
           <span className="text-fg-muted">Version</span><span>v{agent.version}</span>
           <span className="text-fg-muted">Tools</span>
           <span>{(agent.tools || []).map((t: any) => t.type === "custom" ? `Custom: ${t.name}` : t.type).join(", ") || "None"}</span>
+          <span className="text-fg-muted">Skills</span>
+          <span>
+            {(agent.skills || [])
+              .map((s: any) => s.skill_id || s.id)
+              .join(", ") || "None"}
+          </span>
+          <span className="text-fg-muted">MCP Servers</span>
+          <span>
+            {(agent.mcp_servers || [])
+              .map((m: any) => m.name || m.url)
+              .join(", ") || "None"}
+          </span>
           <span className="text-fg-muted">Created</span><span>{new Date(agent.created_at).toLocaleString()}</span>
           <span className="text-fg-muted">Updated</span><span>{new Date(agent.updated_at || agent.created_at).toLocaleString()}</span>
           {agent.archived_at && <><span className="text-fg-muted">Archived</span><span className="text-warning">{new Date(agent.archived_at).toLocaleString()}</span></>}
@@ -218,6 +243,22 @@ export function AgentDetail() {
         </div>
       )}
       </div>
+
+      {showEdit && (
+        <AgentFormDialog
+          open={showEdit}
+          onClose={() => setShowEdit(false)}
+          agent={agent}
+          onCreated={() => {
+            setShowEdit(false);
+            queryClient.invalidateQueries({ queryKey: [`/v1/agents/${id}`] });
+            queryClient.invalidateQueries({ queryKey: [`/v1/agents/${id}/versions`] });
+          }}
+          allAgents={allAgentsRes?.data || []}
+          customSkills={skillsRes?.data || []}
+          modelCards={modelCardsRes?.data || []}
+        />
+      )}
     </Page>
   );
 }

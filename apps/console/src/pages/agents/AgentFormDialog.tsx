@@ -90,17 +90,15 @@ const INITIAL_FORM = {
 interface AgentFormDialogProps {
   open: boolean;
   onClose: () => void;
-  /** Called after the agent is created successfully. Parent uses this
-   *  to refresh the list. The dialog handles its own navigation to the
-   *  new agent's detail page. */
+  /** Called after the agent is created/updated successfully. */
   onCreated?: () => void;
-  /** Data sets the form's pickers pull from. The parent fetches these
-   *  on mount (loadAux) and passes them down so the dialog doesn't have
-   *  to re-fetch on every open. */
-  allAgents: Agent[];
-  customSkills: Array<{ id: string; name: string; description: string }>;
-  modelCards: ModelCard[];
-  runtimes: Array<{
+  /** Existing agent to edit. When provided, the dialog operates in edit mode. */
+  agent?: Agent;
+  /** Data sets the form's pickers pull from. */
+  allAgents?: Agent[];
+  customSkills?: Array<{ id: string; name: string; description: string }>;
+  modelCards?: ModelCard[];
+  runtimes?: Array<{
     id: string;
     hostname: string;
     status: string;
@@ -112,31 +110,20 @@ interface AgentFormDialogProps {
   }>;
 }
 
-/**
- * Create-agent dialog. Multi-step (template → form) with three editor
- * modes (form / yaml / json). Owns all of its own state — `form`,
- * `createStep`, `createMode`, etc. — so the parent `AgentsList` just
- * mounts it and forwards data lists + an `onCreated` hook for the
- * post-save refresh.
- *
- * Stays hand-rolled rather than wrapping `Modal` because the
- * template→form/yaml/json multi-step header doesn't fit the standard
- * Modal layout. Focus trap, scroll lock, focus restore, and Escape
- * handling are reimplemented inline (mirroring `components/Modal.tsx`
- * behavior) so keyboard + screen-reader users get the same affordances.
- */
 export function AgentFormDialog({
   open,
   onClose,
   onCreated,
-  allAgents,
-  customSkills,
-  modelCards,
-  runtimes,
+  agent,
+  allAgents = [],
+  customSkills = [],
+  modelCards = [],
+  runtimes = [],
 }: AgentFormDialogProps) {
   const { api } = useApi();
   const nav = useNavigate();
 
+  const isEdit = !!agent?.id;
   const [createError, setCreateError] = useState("");
   const [createStep, setCreateStep] = useState<"template" | "form">("template");
   const [templateSearch, setTemplateSearch] = useState("");
@@ -149,19 +136,65 @@ export function AgentFormDialog({
   const createDialogRef = useRef<HTMLDivElement>(null);
   const createPreviousFocus = useRef<HTMLElement | null>(null);
 
-  // Pre-select default model card when entering the form step. (tenant_id,
-  // model_id) is UNIQUE in DB, so picking a card uniquely determines the
-  // model. Skip if user/paste already set model. Re-runs when modelCards
-  // arrives if the dialog opened before the aux fetch.
+  // Pre-fill form when editing an existing agent
+  useEffect(() => {
+    if (agent && open) {
+      setCreateStep("form");
+      const modelStr = typeof agent.model === "string" ? agent.model : agent.model?.id || "";
+      const modelCard = modelCards.find((mc) => mc.model_id === modelStr);
+
+      const toolset = (agent.tools || []).find((t: any) => t.type === "agent_toolset_20260401");
+      const overrides: Record<string, ToolOverride> = {};
+      if (toolset?.configs) {
+        for (const c of toolset.configs) {
+          if (c.enabled === false) overrides[c.name] = "disabled";
+          else if (c.permission_policy?.type === "always_ask") overrides[c.name] = "always_ask";
+          else if (c.permission_policy?.type === "always_allow") overrides[c.name] = "always_allow";
+        }
+      }
+
+      setForm({
+        name: agent.name || "",
+        model: modelStr,
+        system: agent.system || "",
+        description: agent.description || "",
+        modelCardId: modelCard?.id || "",
+        mcpServers: (agent.mcp_servers || []).map((m: any) => ({
+          name: m.name || "",
+          type: m.type || "url",
+          url: m.url || "",
+        })),
+        skills: (agent.skills || []).map((s: any) => ({
+          type: s.type || "anthropic",
+          skill_id: s.skill_id || s.id || "",
+          version: s.version,
+        })),
+        callableAgents: (agent.callable_agents || agent.multiagent?.agents || []).map((c: any) => ({
+          type: "agent",
+          id: c.id,
+          version: c.version || 1,
+        })),
+        runtimeId: agent._oma?.runtime_binding?.runtime_id || "",
+        acpAgentId: agent._oma?.runtime_binding?.acp_agent_id || "claude-agent-acp",
+        localSkillBlocklist: agent._oma?.runtime_binding?.local_skill_blocklist || [],
+        toolDefaultEnabled: toolset?.default_config?.enabled ?? true,
+        toolDefaultPermission:
+          toolset?.default_config?.permission_policy?.type === "always_ask"
+            ? "always_ask"
+            : "always_allow",
+        toolOverrides: overrides,
+        enableGeneralSubagent: (agent as any).enable_general_subagent === true,
+      });
+    }
+  }, [agent, open]);
+
+  // Pre-select default model card when entering the form step for new agents
   useEffect(() => {
     if (createStep !== "form") return;
     if (form.modelCardId || form.model) return;
     if (modelCards.length === 0) return;
     const def = modelCards.find((mc) => mc.is_default) ?? modelCards[0];
     setForm((f) => ({ ...f, modelCardId: def.id, model: def.model_id }));
-    // Intentionally not depending on form.* — guards above prevent the
-    // re-trigger loop and we only want to hydrate on step entry / cards arrival.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [createStep, modelCards.length]);
 
   const closeCreate = () => {
@@ -296,15 +329,17 @@ export function AgentFormDialog({
         };
       }
 
-      const agent = await api<Agent>("/v1/agents", {
-        method: "POST",
+      const savedAgent = await api<Agent>(isEdit ? `/v1/agents/${agent.id}` : "/v1/agents", {
+        method: isEdit ? "PUT" : "POST",
         body: JSON.stringify(payload),
       });
       closeCreate();
       onCreated?.();
-      nav(`/agents/${agent.id}`);
+      if (!isEdit) {
+        nav(`/agents/${savedAgent.id}`);
+      }
     } catch (e: any) {
-      setCreateError(e?.message || "Failed to create agent");
+      setCreateError(e?.message || `Failed to ${isEdit ? "update" : "create"} agent`);
     }
   };
 
@@ -492,13 +527,15 @@ export function AgentFormDialog({
         return;
       }
       if (!parsed.tools) parsed.tools = [{ type: "agent_toolset_20260401" }];
-      const agent = await api<Agent>("/v1/agents", {
-        method: "POST",
+      const savedAgent = await api<Agent>(isEdit ? `/v1/agents/${agent.id}` : "/v1/agents", {
+        method: isEdit ? "PUT" : "POST",
         body: JSON.stringify(parsed),
       });
       closeCreate();
       onCreated?.();
-      nav(`/agents/${agent.id}`);
+      if (!isEdit) {
+        nav(`/agents/${savedAgent.id}`);
+      }
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : "Invalid config";
       setCreateError(msg);
@@ -543,12 +580,12 @@ export function AgentFormDialog({
           ref={createDialogRef}
           role="dialog"
           aria-modal="true"
-          aria-label="New Agent"
+          aria-label={isEdit ? `Edit Agent: ${agent?.name}` : "New Agent"}
           className="bg-bg rounded-lg shadow-xl w-full max-w-2xl max-h-[85vh] flex flex-col"
           onClick={(e) => e.stopPropagation()}
         >
           {/* Template selection step */}
-          {createStep === "template" && (
+          {!isEdit && createStep === "template" && (
             <>
               <div className="px-6 pt-6 pb-4 border-b border-border">
                 <h2 className="font-display text-lg font-semibold text-fg">New Agent</h2>
@@ -608,20 +645,24 @@ export function AgentFormDialog({
           )}
 
           {/* Form step */}
-          {createStep === "form" && (
+          {(isEdit || createStep === "form") && (
             <>
               <div className="px-6 pt-6 pb-4 border-b border-border">
                 <div className="flex items-center justify-between mb-1">
-                  <button
-                    onClick={() => {
-                      setCreateStep("template");
-                      setTemplateSearch("");
-                      setCreateMode("form");
-                    }}
-                    className="inline-flex items-center min-h-11 sm:min-h-0 text-sm text-fg-subtle hover:text-fg transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]"
-                  >
-                    &larr; Templates
-                  </button>
+                  {!isEdit ? (
+                    <button
+                      onClick={() => {
+                        setCreateStep("template");
+                        setTemplateSearch("");
+                        setCreateMode("form");
+                      }}
+                      className="inline-flex items-center min-h-11 sm:min-h-0 text-sm text-fg-subtle hover:text-fg transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]"
+                    >
+                      &larr; Templates
+                    </button>
+                  ) : (
+                    <div />
+                  )}
                   <div className="flex items-center gap-0.5 bg-bg-surface rounded-md p-0.5">
                     {(["form", "yaml", "json"] as const).map((m) => (
                       <button
@@ -638,7 +679,9 @@ export function AgentFormDialog({
                     ))}
                   </div>
                 </div>
-                <h2 className="font-display text-lg font-semibold text-fg">New Agent</h2>
+                <h2 className="font-display text-lg font-semibold text-fg">
+                  {isEdit ? `Edit Agent: ${agent?.name}` : "New Agent"}
+                </h2>
                 {createMode === "form" && (
                   <div
                     role="tablist"
@@ -701,7 +744,7 @@ export function AgentFormDialog({
                       onClick={() => setTab("agents")}
                       className={tabCls("agents")}
                     >
-                      Multi-Agent{" "}
+                      Callable Agents{" "}
                       {form.callableAgents.length > 0 && (
                         <span className="ml-1 text-xs opacity-60">
                           ({form.callableAgents.length})
@@ -800,11 +843,11 @@ export function AgentFormDialog({
                   </Button>
                   {createMode === "form" ? (
                     <Button onClick={create} disabled={!form.name}>
-                      Create Agent
+                      {isEdit ? "Save Changes" : "Create Agent"}
                     </Button>
                   ) : (
                     <Button onClick={createFromCode} disabled={!codeValue.trim()}>
-                      Create Agent
+                      {isEdit ? "Save Changes" : "Create Agent"}
                     </Button>
                   )}
                 </div>
@@ -818,8 +861,11 @@ export function AgentFormDialog({
       <McpServerPickerModal
         open={showMcpPicker}
         onClose={() => setShowMcpPicker(false)}
+        onSelect={(entry) => {
+          addMcpFromRegistry(entry);
+          setShowMcpPicker(false);
+        }}
         alreadyAddedUrls={form.mcpServers.map((m) => m.url)}
-        onPick={addMcpFromRegistry}
       />
     </>
   );
