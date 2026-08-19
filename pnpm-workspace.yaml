@@ -9,6 +9,7 @@ packages:
   - 'apps/docs'
   - 'apps/web'
   - 'apps/operations'
+  - 'apps/cmdb-mcp'
 
 # pnpm v11 reads ALL pnpm config from this file — `pnpm` block in
 # package.json is no longer honored. Keep peerDependencyRules + the

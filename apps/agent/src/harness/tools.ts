@@ -369,6 +369,10 @@ export async function buildTools(
      *  nothing because in legacy callsites this is the expected "no MCP"
      *  path. */
     mcpBinding?: { fetch: (request: Request) => Promise<Response> };
+    /** Node self-host MCP transport — factory that returns a fetch function.
+     *  Absent mcpBinding + absent mcpFetch both disable MCP registration
+     *  (legacy path). */
+    mcpFetch?: (server: { name: string; url: string; authorization_token?: string }) => typeof fetch;
     tenantId?: string;
     sessionId?: string;
     watchBackgroundTask?: (taskId: string, pid: string, outputFile: string, proc: ProcessHandle | null) => void;
@@ -1116,17 +1120,18 @@ export async function buildTools(
   // at the tool-registration layer below — only declared servers get
   // registered, and the model has no other tool that takes an arbitrary URL.
   if (agentConfig.mcp_servers?.length) {
-    if (!env?.mcpBinding || !env?.tenantId || !env?.sessionId) {
+    if ((!env?.mcpBinding || !env?.tenantId || !env?.sessionId) && !env?.mcpFetch) {
       // Wiring missing — buildTools called from a context that didn't
-      // thread the binding through (legacy path or test harness). Skip MCP
-      // setup silently rather than crash; the model just won't see the
+      // thread the binding or mcpFetch through (legacy path or test harness).
+      // Skip MCP setup silently rather than crash; the model just won't see the
       // tools and will report "I don't have that available". Caller logs
       // are responsible for surfacing this misconfiguration in real
       // deployments — see SessionDO callsites which always thread it.
     } else {
-      const mcpBinding = env.mcpBinding;
-      const tenantId = env.tenantId;
-      const sessionId = env.sessionId;
+      const mcpBinding = env?.mcpBinding;
+      const tenantId = env?.tenantId;
+      const sessionId = env?.sessionId;
+      const mcpFetch = env?.mcpFetch;
       for (const server of agentConfig.mcp_servers) {
         if (!server.url) {
           // stdio MCP whose sandbox-side spawn hasn't recorded a URL yet
@@ -1142,24 +1147,31 @@ export async function buildTools(
             MCP_SETUP_TIMEOUT_MS,
           );
         });
-        // Custom fetch the SDK calls for every MCP request. We stamp
-        // routing metadata and hand the Request to main; main does the
-        // credential injection + upstream fetch and returns the Response
-        // verbatim (streaming).
-        const proxyFetch: typeof globalThis.fetch = (input, init) => {
-          const req = new Request(input, init);
-          req.headers.set("x-oma-tenant", tenantId);
-          req.headers.set("x-oma-session", sessionId);
-          req.headers.set("x-oma-mcp-server", serverName);
-          return mcpBinding.fetch(req);
-        };
+        // Transport fetch for the SDK:
+        // - In CF Workers (mcpBinding present): stamps tenant/session routing headers and calls main worker.
+        // - In Node self-host (mcpFetch present): calls the factory to get node-compatible fetch.
+        const transportFetch: typeof globalThis.fetch = mcpBinding
+          ? (input, init) => {
+              const req = new Request(input, init);
+              if (tenantId) req.headers.set("x-oma-tenant", tenantId);
+              if (sessionId) req.headers.set("x-oma-session", sessionId);
+              req.headers.set("x-oma-mcp-server", serverName);
+              return mcpBinding.fetch(req);
+            }
+          : mcpFetch
+            ? mcpFetch({
+                name: server.name,
+                url: server.url,
+                authorization_token: server.authorization_token,
+              })
+            : globalThis.fetch;
         try {
           const mcpClient = await Promise.race([
             experimental_createMCPClient({
               transport: {
                 type: "http",
                 url: server.url,
-                fetch: proxyFetch,
+                fetch: transportFetch,
               },
               name: "oma-cloud-agent",
             }),

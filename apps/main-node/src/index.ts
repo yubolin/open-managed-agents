@@ -57,6 +57,7 @@ import type { SessionEvent } from "@open-managed-agents/shared";
 import { generateEventId } from "@open-managed-agents/shared";
 import { DefaultHarness } from "@open-managed-agents/agent/harness/default-loop";
 import { buildTools } from "@open-managed-agents/agent/harness/tools";
+import { createNodeMcpFetch } from "./lib/node-mcp-fetch.js";
 import { resolveModel } from "@open-managed-agents/agent/harness/provider";
 import { composeSystemPrompt } from "@open-managed-agents/agent/harness/platform-guidance";
 import type { HarnessContext } from "@open-managed-agents/agent/harness/interface";
@@ -590,6 +591,7 @@ const sessionRegistry = new SessionRegistry({
       auxModel: aux?.model,
       auxModelInfo: aux?.modelInfo,
       delegateToAgent,
+      mcpFetch: createNodeMcpFetch(),
     });
   },
   buildHarness: () => {
