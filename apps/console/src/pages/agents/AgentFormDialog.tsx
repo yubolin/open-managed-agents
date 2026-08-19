@@ -889,8 +889,8 @@ export function AgentFormDialog({
         <Modal
           open={showConfirmDiff}
           onClose={() => !isSaving && setShowConfirmDiff(false)}
-          title="确认发布新版本？"
-          subtitle={`当前版本 v${agent.version} 将生成新版本 v${agent.version + 1}。`}
+          title={`Confirm Release v${agent.version + 1}`}
+          subtitle={`Current version v${agent.version} will be upgraded to v${agent.version + 1}.`}
           maxWidth="max-w-lg"
           footer={
             <div className="flex justify-end gap-2 w-full">
@@ -899,13 +899,13 @@ export function AgentFormDialog({
                 disabled={isSaving}
                 onClick={() => setShowConfirmDiff(false)}
               >
-                返回修改
+                Back to Edit
               </Button>
               <Button
                 disabled={isSaving}
                 onClick={executeSave}
               >
-                {isSaving ? "正在保存..." : `确认发布 v${agent.version + 1}`}
+                {isSaving ? "Saving..." : `Confirm & Publish v${agent.version + 1}`}
               </Button>
             </div>
           }
@@ -966,30 +966,30 @@ function AgentDiffSummary({
   return (
     <div className="space-y-4 text-sm">
       <div className="flex items-center justify-between p-3 bg-bg-surface border border-border rounded-lg">
-        <div className="text-xs text-fg-muted font-medium">版本演进</div>
+        <div className="text-xs text-fg-muted font-medium">Version Evolution</div>
         <div className="flex items-center gap-2 font-mono">
           <span className="px-2 py-0.5 bg-bg border border-border rounded text-fg-muted text-xs">
-            v{agent.version} (当前)
+            v{agent.version} (current)
           </span>
           <span className="text-fg-subtle">➔</span>
           <span className="px-2 py-0.5 bg-brand text-brand-fg font-semibold rounded text-xs">
-            v{agent.version + 1} (新版本)
+            v{agent.version + 1} (new)
           </span>
         </div>
       </div>
 
       <div className="space-y-2.5">
-        <div className="text-xs font-semibold text-fg-muted uppercase tracking-wider">变更摘要</div>
+        <div className="text-xs font-semibold text-fg-muted uppercase tracking-wider">Change Summary</div>
 
         {!hasAnyChanges && (
           <div className="text-xs text-fg-subtle p-3 rounded bg-bg border border-border text-center">
-            未检测到配置变动（将生成新的快照版本 v{agent.version + 1}）
+            No configuration changes detected (will snapshot as v{agent.version + 1})
           </div>
         )}
 
         {isNameChanged && (
           <div className="flex items-center justify-between p-2 rounded bg-bg border border-border">
-            <span className="text-fg-muted text-xs">智能体名称</span>
+            <span className="text-fg-muted text-xs">Agent Name</span>
             <span className="font-mono text-xs">
               <del className="text-danger mr-2">{agent.name}</del>
               <ins className="text-success no-underline">{form.name}</ins>
@@ -999,7 +999,7 @@ function AgentDiffSummary({
 
         {isModelChanged && (
           <div className="flex items-center justify-between p-2 rounded bg-bg border border-border">
-            <span className="text-fg-muted text-xs">模型变更</span>
+            <span className="text-fg-muted text-xs">Model</span>
             <span className="font-mono text-xs">
               <del className="text-danger mr-2">{oldModel}</del>
               <ins className="text-success no-underline">{form.model}</ins>
@@ -1009,21 +1009,21 @@ function AgentDiffSummary({
 
         {isSystemChanged && (
           <div className="flex items-center justify-between p-2 rounded bg-bg border border-border">
-            <span className="text-fg-muted text-xs">系统提示词 (System Prompt)</span>
-            <span className="text-xs text-brand font-medium">已修改</span>
+            <span className="text-fg-muted text-xs">System Prompt</span>
+            <span className="text-xs text-brand font-medium">Updated</span>
           </div>
         )}
 
         {isDescChanged && (
           <div className="flex items-center justify-between p-2 rounded bg-bg border border-border">
-            <span className="text-fg-muted text-xs">描述信息</span>
-            <span className="text-xs text-brand font-medium">已修改</span>
+            <span className="text-fg-muted text-xs">Description</span>
+            <span className="text-xs text-brand font-medium">Updated</span>
           </div>
         )}
 
         {(addedSkills.length > 0 || removedSkills.length > 0) && (
           <div className="p-2.5 rounded bg-bg border border-border space-y-1.5">
-            <span className="text-fg-muted block text-xs">技能 (Skills) 变动:</span>
+            <span className="text-fg-muted block text-xs">Skills Changes:</span>
             <div className="flex flex-wrap gap-1.5">
               {addedSkills.map((s) => (
                 <span key={s} className="px-2 py-0.5 rounded bg-success-subtle text-success text-xs font-mono">
@@ -1041,7 +1041,7 @@ function AgentDiffSummary({
 
         {(addedMcps.length > 0 || removedMcps.length > 0) && (
           <div className="p-2.5 rounded bg-bg border border-border space-y-1.5">
-            <span className="text-fg-muted block text-xs">MCP 服务变动:</span>
+            <span className="text-fg-muted block text-xs">MCP Servers Changes:</span>
             <div className="flex flex-wrap gap-1.5">
               {addedMcps.map((m) => (
                 <span key={m} className="px-2 py-0.5 rounded bg-success-subtle text-success text-xs font-mono">
@@ -1059,7 +1059,7 @@ function AgentDiffSummary({
       </div>
 
       <div className="text-xs text-fg-subtle pt-2 border-t border-border/50">
-        💡 提示：确认保存后将自动升级为 <strong>v{agent.version + 1}</strong> 并作为后续会话的默认版本；现有会话将不受影响。
+        💡 Note: Saving publishes <strong>v{agent.version + 1}</strong> as the active default for subsequent sessions; existing sessions remain locked to their original version.
       </div>
     </div>
   );
