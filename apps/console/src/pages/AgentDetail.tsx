@@ -74,6 +74,25 @@ export function AgentDetail() {
   );
 
   const versions = versionsRes?.data ?? [];
+  const allVersions = useMemo(() => {
+    if (!agent) return [];
+    const history = [...versions].filter((h) => h.version !== agent.version);
+    return [
+      {
+        version: agent.version,
+        model: agent.model,
+        system: agent.system,
+        isCurrent: true,
+      },
+      ...history.map((h) => ({
+        version: h.version,
+        model: h.model,
+        system: h.system,
+        isCurrent: false,
+      })),
+    ].sort((a, b) => b.version - a.version);
+  }, [agent, versions]);
+
   // Filter to live publications only — same predicate the old useEffect ran.
   const linearPubs = useMemo(
     () => (linearRes?.data ?? []).filter((p) => p.status === "live"),
@@ -217,7 +236,7 @@ export function AgentDetail() {
       )}
 
       {/* Version history */}
-      {versions.length > 0 && (
+      {allVersions.length > 0 && (
         <div className="mt-8 max-w-2xl">
           <h2 className="font-display text-base font-semibold mb-2">Version History</h2>
           <div className="border border-border rounded-lg overflow-x-auto">
@@ -230,9 +249,16 @@ export function AgentDetail() {
                 </tr>
               </thead>
               <tbody>
-                {versions.map((v) => (
+                {allVersions.map((v) => (
                   <tr key={v.version} className="border-t border-border">
-                    <td className="px-4 py-2">v{v.version}</td>
+                    <td className="px-4 py-2 flex items-center gap-2">
+                      <span className="font-mono">v{v.version}</span>
+                      {v.isCurrent && (
+                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-brand/15 text-brand font-medium">
+                          Current
+                        </span>
+                      )}
+                    </td>
                     <td className="px-4 py-2 text-fg-muted">{modelStr(v.model)}</td>
                     <td className="px-4 py-2 text-fg-muted max-w-xs truncate">{v.system || "—"}</td>
                   </tr>
