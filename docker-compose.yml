@@ -97,3 +97,43 @@ services:
     volumes:
       - ./data:/app/data
     restart: unless-stopped
+
+  # CMDB MCP Knowledge Connector — stateless proxy to internal CMDB (https://10.0.21.209).
+  # Exposes tools (mcp__cmdb__get_entity, mcp__cmdb__search_entities, mcp__cmdb__get_relationships)
+  # over Streamable-HTTP JSON-RPC on port 3910. Outbound traffic to CMDB routes through oma-vault
+  # for transparent encrypted credential injection from the vault store.
+  oma-cmdb-mcp:
+    build:
+      context: .
+      dockerfile: apps/cmdb-mcp/Dockerfile
+    image: openma/cmdb-mcp:dev
+    container_name: oma-cmdb-mcp
+    environment:
+      PORT: "3910"
+      CMDB_BASE_URL: ${CMDB_BASE_URL:-https://10.0.21.209}
+      # Choose either: admin credentials, static token, or Vault proxy mode
+      CMDB_USERNAME: ${CMDB_USERNAME:-}
+      CMDB_PASSWORD: ${CMDB_PASSWORD:-}
+      CMDB_API_TOKEN: ${CMDB_API_TOKEN:-}
+      CMDB_AUTH_HEADER: ${CMDB_AUTH_HEADER:-Authorization}
+      CMDB_AUTH_SCHEME: ${CMDB_AUTH_SCHEME:-Bearer}
+      CMDB_MCP_INGRESS_TOKEN: ${CMDB_MCP_INGRESS_TOKEN:-}
+      # Vault outbound proxy
+      HTTPS_PROXY: http://oma-vault:14322
+      HTTP_PROXY: http://oma-vault:14322
+      # Internal IP TLS / self-signed certificate SAN compatibility
+      NODE_TLS_REJECT_UNAUTHORIZED: ${NODE_TLS_REJECT_UNAUTHORIZED:-0}
+      LOG_LEVEL: ${CMDB_MCP_LOG_LEVEL:-info}
+    volumes:
+      - ./secrets/cmdb-ca.crt:/app/certs/cmdb-ca.crt:ro
+      - ./data:/app/data:ro
+    depends_on:
+      oma-vault:
+        condition: service_started
+    mem_limit: 256m
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3910/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3

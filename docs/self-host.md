@@ -533,6 +533,39 @@ Open `http://localhost:5173` (dev) or `http://localhost:8787` (docker),
 sign up via email + password. The verification OTP is printed to
 main-node's stdout — paste into the console verify-signup screen.
 Operators wiring real email replace the `sendVerificationOTP` callback
+
+### CMDB MCP Knowledge Connector (Internal Infrastructure)
+
+Self-host deployments can connect to internal CMDB instances (such as `https://10.0.21.209`) through the `oma-cmdb-mcp` sidecar container.
+
+#### 1. Setup & Credentials
+1. Save the CMDB CA certificate to `./secrets/cmdb-ca.crt`:
+   ```bash
+   mkdir -p secrets
+   openssl s_client -connect 10.0.21.209:443 -showcerts </dev/null 2>/dev/null \
+     | awk '/BEGIN CERTIFICATE/,/END CERTIFICATE/{print}' > secrets/cmdb-ca.crt
+   ```
+2. Configure `.env`:
+   ```bash
+   CMDB_BASE_URL=https://10.0.21.209
+   CMDB_API_TOKEN=your-cmdb-api-token
+   ```
+3. Start the stack:
+   ```bash
+   docker compose up -d oma-cmdb-mcp
+   ```
+
+#### 2. Security Boundary
+- **Token Isolation**: `CMDB_API_TOKEN` and the CA certificate exist **only** inside the `oma-cmdb-mcp` container.
+- `oma-server` and agent sandboxes never see or store the raw token.
+- Agents interact with the CMDB strictly via high-level MCP tool calls (`mcp__cmdb__get_entity`, `mcp__cmdb__search_entities`, `mcp__cmdb__get_relationships`).
+
+#### 3. Attaching to Agents
+Attach the CMDB MCP endpoint (`http://oma-cmdb-mcp:3910/mcp`) to any agent via Console UI or the helper script:
+```bash
+pnpm --filter @open-managed-agents/root tsx scripts/attach-cmdb-mcp.ts
+```
+
 in `apps/main-node/src/auth/config.ts` with a Resend / SES / SMTP call.
 
 Endpoints main-node implements for the console:

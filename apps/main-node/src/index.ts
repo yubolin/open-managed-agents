@@ -57,6 +57,7 @@ import type { SessionEvent } from "@open-managed-agents/shared";
 import { generateEventId } from "@open-managed-agents/shared";
 import { DefaultHarness } from "@open-managed-agents/agent/harness/default-loop";
 import { buildTools } from "@open-managed-agents/agent/harness/tools";
+import { createNodeMcpFetch } from "./lib/node-mcp-fetch.js";
 import { resolveModel } from "@open-managed-agents/agent/harness/provider";
 import { composeSystemPrompt } from "@open-managed-agents/agent/harness/platform-guidance";
 import type { HarnessContext } from "@open-managed-agents/agent/harness/interface";
@@ -590,6 +591,7 @@ const sessionRegistry = new SessionRegistry({
       auxModel: aux?.model,
       auxModelInfo: aux?.modelInfo,
       delegateToAgent,
+      mcpFetch: createNodeMcpFetch(),
     });
   },
   buildHarness: () => {
@@ -976,6 +978,35 @@ v1.route("/evals", buildEvalRoutes({
   agents: agentsService,
   environments: environmentsService,
 }));
+
+v1.get("/stats", async (c) => {
+  const tenantId = c.get("tenant_id") || "default";
+  const [
+    agents,
+    sessions,
+    environments,
+    vaults,
+    modelCardsList,
+    apiKeysList,
+  ] = await Promise.all([
+    agentsService.count({ tenantId }).catch(() => 0),
+    sessionsService.count({ tenantId }).catch(() => 0),
+    environmentsService.count({ tenantId }).catch(() => 0),
+    vaultService.count({ tenantId }).catch(() => 0),
+    modelCardsService.list({ tenantId }).catch(() => []),
+    apiKeyStorage.listByTenant(tenantId).catch(() => []),
+  ]);
+
+  return c.json({
+    agents: typeof agents === "number" ? agents : 0,
+    sessions: typeof sessions === "number" ? sessions : 0,
+    environments: typeof environments === "number" ? environments : 0,
+    vaults: typeof vaults === "number" ? vaults : 0,
+    skills: 0,
+    model_cards: Array.isArray(modelCardsList) ? modelCardsList.length : 0,
+    api_keys: Array.isArray(apiKeysList) ? apiKeysList.length : 0,
+  });
+});
 
 // Stubs for routes the console hits but main-node doesn't yet implement.
 v1.get("/runtimes", (c) => c.json({ data: [] }));
