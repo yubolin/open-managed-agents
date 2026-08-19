@@ -3,6 +3,7 @@ import type { CmdbMcpConfig } from "./config.js";
 import { defaultLogger, Logger } from "./logger.js";
 import { SqlEngine } from "./sql/db.js";
 import { SchemaReflector } from "./sql/schema.js";
+import { VirtualSqliteDb } from "./sql/virtual-sqlite.js";
 
 export type EntityClass =
   | "host"
@@ -77,6 +78,7 @@ export class CmdbClient {
   private customFetch: typeof globalThis.fetch;
   private sqlEngine?: SqlEngine;
   private schemaReflector?: SchemaReflector;
+  private virtualSqlite: VirtualSqliteDb;
 
   private dynamicAccessToken?: string;
   private dynamicRefreshToken?: string;
@@ -91,6 +93,7 @@ export class CmdbClient {
     this.config = config;
     this.logger = logger;
     this.customFetch = customFetch;
+    this.virtualSqlite = new VirtualSqliteDb(this.logger);
 
     if (sqlEngine) {
       this.sqlEngine = sqlEngine;
@@ -437,11 +440,24 @@ export class CmdbClient {
     );
 
     const rawItems = listRes.items || [];
-    const entities = rawItems.map((r) => this.normalizeEntity(r));
+    const entities = rawItems.map((r) => {
+      const e = this.normalizeEntity(r);
+      return {
+        entity_id: e.entity_id,
+        entity_class: e.entity_class,
+        hostname: e.hostname,
+        ips: e.ips,
+        owner_team: e.owner_team,
+        labels: e.labels,
+        status: typeof r.status === "string" ? r.status : undefined,
+        vendor: typeof r.vendor === "string" ? r.vendor : undefined,
+        tenant_id: typeof r.tenant_id === "string" ? r.tenant_id : undefined,
+      };
+    });
     const total = listRes.total ?? entities.length;
 
     return {
-      entities,
+      entities: entities as CmdbEntity[],
       total,
       truncated: total > entities.length,
     };
@@ -717,11 +733,10 @@ export class CmdbClient {
       return res as unknown as Record<string, unknown>;
     }
 
-    throw new CmdbClientError(
-      "CMDB_DB_NOT_CONFIGURED",
-      "Direct SQL query requires CMDB_DB_URL configured in environment. For standard queries, use search_entities / get_asset_stats.",
-      false,
-    );
+    // In API mode, execute seamlessly against in-memory virtual SQLite synced from CMDB API
+    await this.virtualSqlite.ensureSynced(this);
+    const res = this.virtualSqlite.executeQuery(opts.sql, opts.limit);
+    return res as unknown as Record<string, unknown>;
   }
 }
 
