@@ -131,7 +131,8 @@ services:
       CMDB_MCP_INGRESS_TOKEN: ${CMDB_MCP_INGRESS_TOKEN:-}
       HTTPS_PROXY: http://oma-vault:14322
       HTTP_PROXY: http://oma-vault:14322
-      NODE_EXTRA_CA_CERTS: /app/data/oma-vault-ca/ca.crt
+      # Internal IP TLS / self-signed certificate SAN compatibility
+      NODE_TLS_REJECT_UNAUTHORIZED: ${NODE_TLS_REJECT_UNAUTHORIZED:-0}
       LOG_LEVEL: ${CMDB_MCP_LOG_LEVEL:-info}
     volumes:
       - ./secrets/cmdb-ca.crt:/app/certs/cmdb-ca.crt:ro
