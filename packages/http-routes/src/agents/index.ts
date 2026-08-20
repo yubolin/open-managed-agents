@@ -416,14 +416,24 @@ export function buildAgentRoutes(deps: AgentRoutesDeps) {
       appendable_prompts: raw._oma?.appendable_prompts,
     };
 
-    // Optimistic concurrency (SDS agent-self-install §2.5): the agent row's
-    // `version` is the etag. An update without it races silently — demand a
-    // re-read instead of guessing.
-    if (body.version === undefined || body.version === null) {
+    // Optimistic concurrency (SDS agent-self-install §2.5) is enforced
+    // ONLY on the attach_skill control plane — i.e. updates that touch
+    // the `skills` array. Other updates (model, system prompt, name,
+    // etc.) keep the legacy silent-etag bump so the public SDK +
+    // existing API consumers don't get a breaking 428 the moment they
+    // PATCH a non-skill field. attach_skill always re-reads the agent
+    // first (SessionDO owns its agent version snapshot) so it can pass
+    // the version it just observed; SDK UpdateAgentInput will gain an
+    // optional `version` for callers who want the strict lane.
+    const touchesSkills = Array.isArray(body.skills);
+    if (
+      touchesSkills &&
+      (body.version === undefined || body.version === null)
+    ) {
       return c.json(
         {
           error:
-            "version is required for updates (optimistic concurrency); re-read the agent and retry",
+            "version is required for attach_skill updates (optimistic concurrency); re-read the agent and retry",
         },
         428,
       );

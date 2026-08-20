@@ -245,18 +245,26 @@ export type SessionEvent =
 
 // ─── Resource shapes (minimal — extend per resource as needed) ────
 
+export type SkillConfig =
+  | { type?: "custom"; skill_id: string; version?: string }
+  | { type: "anthropic"; skill_id: string }
+  | { type: "prompt"; skill_id: string }
+  | { type: string; [k: string]: unknown };
+
 export interface AgentSummary {
   id: string;
   name: string;
-  model: { id: string; speed?: string };
+  model: string | { id: string; speed?: string };
+  version?: number;
   created_at: string;
   updated_at: string;
 }
 
 export interface AgentDetail extends AgentSummary {
+  version: number;
   system: string;
   tools: unknown[];
-  skills?: string[];
+  skills?: SkillConfig[];
   mcp_servers?: unknown[];
   description?: string | null;
   metadata?: Record<string, unknown>;

@@ -53,6 +53,7 @@ import {
 import {
   skillConfirmationGuard,
   ConfirmationRequiredError,
+  type ConfirmationBinding,
 } from "./lib/skill-confirmation";
 import { listMemberships, hasMembership } from "./auth-config";
 import environmentsRoutes from "./routes/environments";
@@ -1001,6 +1002,7 @@ export class SkillRpc extends WorkerEntrypoint<Env> {
     /** One-time 60s-TTL token minted by the Console approval modal
      *  (SDS §2.2). Admin tenants (OMA_SKILL_ADMIN_ALLOWLIST) omit it. */
     confirmationToken?: string;
+    binding?: ConfirmationBinding;
   }): Promise<
     | { status: 201; skill: InstalledSkill }
     | { status: number; error: string }
@@ -1015,6 +1017,7 @@ export class SkillRpc extends WorkerEntrypoint<Env> {
         tenantId: opts.tenantId,
         token: opts.confirmationToken,
         purpose: "install",
+        binding: opts.binding,
         adminAllowlist: this.env.OMA_SKILL_ADMIN_ALLOWLIST,
       });
       const skill = await installClawHubSkill({
@@ -1055,6 +1058,7 @@ export class SkillRpc extends WorkerEntrypoint<Env> {
     /** One-time 60s-TTL token minted by the Console approval modal
      *  (SDS §2.2). Admin tenants (OMA_SKILL_ADMIN_ALLOWLIST) omit it. */
     confirmationToken?: string;
+    binding?: ConfirmationBinding;
   }): Promise<
     | { status: 200; attached: AttachedSkill }
     | { status: number; error: string }
@@ -1066,6 +1070,7 @@ export class SkillRpc extends WorkerEntrypoint<Env> {
         tenantId: opts.tenantId,
         token: opts.confirmationToken,
         purpose: "attach",
+        binding: opts.binding,
         adminAllowlist: this.env.OMA_SKILL_ADMIN_ALLOWLIST,
       });
       const attached = await attachSkillToAgent({

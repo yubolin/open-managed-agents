@@ -92,7 +92,13 @@ export function SkillApprovalCard(props: {
         // must be minted in the same breath as the approval POST.
         const mint = (await props.api("/v1/skills/confirmation", {
           method: "POST",
-          body: JSON.stringify({ purpose: purposeFor(call.name) }),
+          body: JSON.stringify({
+            purpose: purposeFor(call.name),
+            session_id: props.sessionId,
+            tool_use_id: call.id,
+            tool_name: call.name,
+            input: call.input,
+          }),
         })) as { confirmation_token?: string };
         if (!mint?.confirmation_token) {
           toast.error("Confirmation mint failed — approval not sent.");

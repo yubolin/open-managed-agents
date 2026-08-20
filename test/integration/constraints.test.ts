@@ -443,7 +443,10 @@ describe("Constraint validations", () => {
       expect(agent.skills).toEqual([]);
 
       const skills = [{ type: "anthropic", skill_id: "data_analysis" }];
-      const updateRes = await put(`/v1/agents/${agent.id}`, { skills });
+      // F6: skills updates require the agent row's version (attach_skill
+      // control plane; SDS §2.5). Other fields keep the legacy silent
+      // etag bump — only skills is concurrency-controlled.
+      const updateRes = await put(`/v1/agents/${agent.id}`, { skills, version: agent.version });
       expect(updateRes.status).toBe(200);
       const updated = (await updateRes.json()) as any;
       expect(updated.skills).toEqual(skills);
@@ -522,6 +525,8 @@ describe("Constraint validations", () => {
         skills: [{ type: "custom", skill_id: "custom_skill", version: "2.0" }],
         callable_agents: [{ type: "agent", id: "agent_new", version: 5 }],
         metadata: { release: "v2" },
+        // F6: skills updates require the agent's current version.
+        version: agent.version,
       });
       expect(updateRes.status).toBe(200);
       const updated = (await updateRes.json()) as any;

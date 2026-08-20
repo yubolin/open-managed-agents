@@ -58,6 +58,8 @@ import { generateEventId } from "@open-managed-agents/shared";
 import { DefaultHarness } from "@open-managed-agents/agent/harness/default-loop";
 import { buildTools } from "@open-managed-agents/agent/harness/tools";
 import { createNodeMcpFetch } from "./lib/node-mcp-fetch.js";
+import { InMemoryKvStore } from "@open-managed-agents/kv-store/adapters/in-memory";
+import { createNodeSkillRpc, mintSkillConfirmation } from "./lib/node-skill-rpc.js";
 import { resolveModel } from "@open-managed-agents/agent/harness/provider";
 import { composeSystemPrompt } from "@open-managed-agents/agent/harness/platform-guidance";
 import type { HarnessContext } from "@open-managed-agents/agent/harness/interface";
@@ -442,6 +444,15 @@ const sandboxOrchestrator = new DefaultSandboxOrchestrator({
   backups: workspaceBackups,
 });
 
+const nodeKvStore = new InMemoryKvStore();
+const nodeSkillRpc = createNodeSkillRpc({
+  agents: agentsService,
+  filesBlob,
+  kv: nodeKvStore,
+  adminAllowlist: process.env.OMA_SKILL_ADMIN_ALLOWLIST,
+  requireVerified: process.env.OMA_SKILL_REQUIRE_VERIFIED,
+});
+
 // ─── Hub + event log ────────────────────────────────────────────────────
 
 function newEventLog(sessionId: string): SqlEventLog {
@@ -592,6 +603,9 @@ const sessionRegistry = new SessionRegistry({
       auxModelInfo: aux?.modelInfo,
       delegateToAgent,
       mcpFetch: createNodeMcpFetch(),
+      tenantId,
+      sessionId: _sessionId,
+      skillRpc: nodeSkillRpc,
     });
   },
   buildHarness: () => {
@@ -1043,7 +1057,59 @@ const nodeNotImplemented = (c: { json: (body: unknown, status: number) => Respon
   );
 
 v1.get("/runtimes", nodeNotImplemented);
-v1.get("/skills", nodeNotImplemented);
+v1.get("/skills", async (c) => {
+  const tenantId = c.get("tenant_id") || "default";
+  const list = await nodeKvStore.list({ prefix: `t:${tenantId}:skill:` });
+  const items = [];
+  for (const k of list.keys) {
+    const raw = await nodeKvStore.get(k.name);
+    if (raw) {
+      try {
+        items.push(JSON.parse(raw));
+      } catch {}
+    }
+  }
+  return c.json({ data: items });
+});
+v1.post("/skills/confirmation", async (c) => {
+  const tenantId = c.get("tenant_id") || "default";
+  const body = await c.req
+    .json<{
+      purpose?: string;
+      session_id?: string;
+      tool_use_id?: string;
+      tool_name?: string;
+      input?: unknown;
+    }>()
+    .catch(() => ({} as {
+      purpose?: string;
+      session_id?: string;
+      tool_use_id?: string;
+      tool_name?: string;
+      input?: unknown;
+    }));
+  if (body.purpose !== "install" && body.purpose !== "attach") {
+    return c.json({ error: "purpose must be 'install' or 'attach'" }, 400);
+  }
+  if (!body.session_id || !body.tool_use_id || !body.tool_name) {
+    return c.json(
+      { error: "session_id, tool_use_id, and tool_name are required for confirmation binding" },
+      400,
+    );
+  }
+  const res = await mintSkillConfirmation({
+    kv: nodeKvStore,
+    tenantId,
+    purpose: body.purpose,
+    binding: {
+      sessionId: body.session_id,
+      toolUseId: body.tool_use_id,
+      toolName: body.tool_name,
+      canonicalInput: body.input ?? {},
+    },
+  });
+  return c.json({ confirmation_token: res.token, expires_in: res.expires_in }, 201);
+});
 v1.route("/environments", buildEnvironmentRoutes({
   environments: environmentsService,
   sessions: sessionsService,

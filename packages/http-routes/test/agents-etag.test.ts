@@ -1,9 +1,12 @@
 // F6: agent update etag protocol (SDS agent-self-install §2.5).
 // The agent row's `version` is the concurrency token (If-Match role):
-//   - update WITHOUT version → 428 Precondition Required
-//   - update with STALE version → 409 (existing AgentVersionMismatchError
-//     mapping; body must tell the caller what happened)
-//   - update with current version → 200, version bumps by 1
+//   - attach_skill update WITHOUT version → 428 Precondition Required
+//   - attach_skill update with STALE version → 409
+//   - attach_skill update with current version → 200, version bumps by 1
+//   - non-skills updates (model, name, system, etc.) keep the legacy
+//     silent-etag bump — public SDK UpdateAgentInput does not require
+//     `version`, so demanding it for every PUT would be a breaking API
+//     change. The 428 is scoped to the new attach_skill control plane.
 // Retry-once itself lives in skillAttach (F4, apps/main lib test) — this
 // file pins the HTTP-lane contract both CF and Node mounts share.
 
@@ -50,30 +53,54 @@ function updateInit(body: Record<string, unknown>): RequestInit {
 }
 
 describe("PUT /v1/agents/:id optimistic concurrency (SDS §2.5)", () => {
-  it("missing version → 428 Precondition Required", async () => {
+  it("non-skills update WITHOUT version → 200 (legacy silent-etag lane)", async () => {
+    // P1 review 2026-08-20: 428 must NOT fire for plain renames /
+    // model swaps / system-prompt edits — only attach_skill touches
+    // the concurrency token. Existing API consumers would otherwise
+    // break the moment they PATCH any non-skill field.
     const app = makeApp();
     const { id } = await createAgent(app);
     const res = await app.request(`/${id}`, updateInit({ name: "renamed" }));
+    expect(res.status).toBe(200);
+  });
+
+  it("attach_skill update WITHOUT version → 428 Precondition Required", async () => {
+    const app = makeApp();
+    const { id } = await createAgent(app);
+    const res = await app.request(
+      `/${id}`,
+      updateInit({ skills: [{ skill_id: "skill_x", type: "skill" }] }),
+    );
     expect(res.status).toBe(428);
     const body = (await res.json()) as { error: string };
     expect(body.error).toMatch(/version/i);
+    expect(body.error).toMatch(/attach/i);
   });
 
-  it("stale version → 409", async () => {
+  it("attach_skill update with STALE version → 409", async () => {
     const app = makeApp();
     const { id, version } = await createAgent(app);
     // First update bumps version to version+1…
-    const first = await app.request(`/${id}`, updateInit({ name: "v2", version }));
+    const first = await app.request(
+      `/${id}`,
+      updateInit({ skills: [{ skill_id: "skill_x", type: "skill" }], version }),
+    );
     expect(first.status).toBe(200);
     // …so the ORIGINAL version is now stale.
-    const stale = await app.request(`/${id}`, updateInit({ name: "v3", version }));
+    const stale = await app.request(
+      `/${id}`,
+      updateInit({ skills: [{ skill_id: "skill_y", type: "skill" }], version }),
+    );
     expect(stale.status).toBe(409);
   });
 
-  it("current version → 200 and version bumps", async () => {
+  it("attach_skill update with CURRENT version → 200 and version bumps", async () => {
     const app = makeApp();
     const { id, version } = await createAgent(app);
-    const res = await app.request(`/${id}`, updateInit({ name: "v2", version }));
+    const res = await app.request(
+      `/${id}`,
+      updateInit({ skills: [{ skill_id: "skill_x", type: "skill" }], version }),
+    );
     expect(res.status).toBe(200);
     const body = (await res.json()) as { version: number };
     expect(body.version).toBe(version + 1);

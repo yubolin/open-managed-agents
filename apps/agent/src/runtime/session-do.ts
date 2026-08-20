@@ -74,7 +74,7 @@ import {
   type ActiveOutcomeState,
   type OutcomeEvaluationRecord,
 } from "./outcome-supervisor";
-import { buildTools } from "../harness/tools";
+import { buildTools, DEFAULT_TOOLS, DEFAULT_ASK_TOOLS } from "../harness/tools";
 import { MemoryStoreService } from "@open-managed-agents/memory-store";
 import { buildCfServices, buildCfTenantDbProvider, getCfServicesForTenant } from "@open-managed-agents/services";
 import { toEnvironmentConfig } from "@open-managed-agents/environments-store";
@@ -3655,6 +3655,14 @@ export class SessionDO extends DurableObject<Env> {
           // modal rides the user.tool_confirmation event. Scoped to THIS
           // re-execution only — the model-driven path never sees it.
           skillConfirmToken: confirmation.confirmation_token,
+          skillConfirmBinding: confirmation.confirmation_token
+            ? {
+                sessionId: this.state.session_id,
+                toolUseId: pending.toolCallId,
+                toolName: pending.toolName,
+                canonicalInput: pending.args,
+              }
+            : undefined,
           browser: this.getBrowserHarness() ?? undefined,
           auxModel: auxResolved?.model,
           auxModelInfo: auxResolved?.modelInfo,
@@ -4783,14 +4791,23 @@ export class SessionDO extends DurableObject<Env> {
       // Determine stop reason based on pending tool confirmations or custom tool results
       const pendingConfirmations = ctx.runtime.pendingConfirmations || [];
 
-      // Check if any pending are custom tool uses (no execute function, not always_ask built-in)
+      // Check if any pending are custom tool uses (no execute function, not
+      // a known always_ask built-in). P1 review 2026-08-20: the previous
+      // hardcoded name list silently classified install_skill /
+      // attach_skill / search_skill as `custom_tool_result`, which made
+      // SDK + non-Console clients pick the wrong protocol branch.
+      // Now we use the unified DEFAULT_TOOLS / DEFAULT_ASK_TOOLS
+      // registries from harness/tools.ts — single source of truth.
       const storedPendingCalls = this.state.pending_tool_calls;
-      const hasCustomToolPending = storedPendingCalls.some(p =>
-        !["bash", "read", "write", "edit", "glob", "grep", "web_fetch", "web_search"].includes(p.toolName) &&
-        !p.toolName.startsWith("mcp_") &&
-        !p.toolName.startsWith("call_agent_") &&
-        !p.toolName.startsWith("memory_")
-      );
+      const builtinSet = new Set<string>(DEFAULT_TOOLS);
+      for (const t of DEFAULT_ASK_TOOLS) builtinSet.add(t);
+      const hasCustomToolPending = storedPendingCalls.some(p => {
+        if (builtinSet.has(p.toolName)) return false;
+        if (p.toolName.startsWith("mcp_")) return false;
+        if (p.toolName.startsWith("call_agent_")) return false;
+        if (p.toolName.startsWith("memory_")) return false;
+        return true;
+      });
 
       let stopReason: import("@open-managed-agents/shared").SessionStatusEvent["stop_reason"];
       if (hasCustomToolPending) {

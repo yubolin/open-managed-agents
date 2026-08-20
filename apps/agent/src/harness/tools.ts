@@ -294,8 +294,15 @@ function jsonSchemaPropertyToZod(prop: Record<string, unknown>): z.ZodTypeAny {
 
 /** Tools whose DEFAULT permission tier is always_ask (agent self-install
  *  SDS §2.1) — mutating skill operations. Explicit per-tool or toolset
- *  config still overrides this fallback. */
-const DEFAULT_ASK_TOOLS = new Set(["install_skill", "attach_skill", "detach_skill", "uninstall_skill"]);
+ *  config still overrides this fallback. Exported so session-do.ts
+ *  classifies them as built-in tool confirmations, not as opaque
+ *  `custom_tool_result` events (P1 review 2026-08-20). */
+export const DEFAULT_ASK_TOOLS = new Set([
+  "install_skill",
+  "attach_skill",
+  "detach_skill",
+  "uninstall_skill",
+]);
 
 /**
  * Resolve the permission policy for a given tool name from the agent config.
@@ -393,6 +400,12 @@ export async function buildTools(
      *  confirmation_token); the normal model-driven path leaves it unset
      *  and the platform rejects the call with 403. */
     skillConfirmToken?: string;
+    skillConfirmBinding?: {
+      sessionId: string;
+      toolUseId: string;
+      toolName: string;
+      canonicalInput: unknown;
+    };
     /** Skill self-service channel (agent self-install SDS §2.1). CF wires
      *  this to the SKILL_RPC WorkerEntrypoint binding on SessionDO; the
      *  ClawHub registry call executes in the main worker so the agent
@@ -412,6 +425,12 @@ export async function buildTools(
         slug: string;
         version: string;
         confirmationToken?: string;
+        binding?: {
+          sessionId: string;
+          toolUseId: string;
+          toolName: string;
+          canonicalInput: unknown;
+        };
       }): Promise<
         | { status: 201; skill: Record<string, unknown> }
         | { status: number; error: string }
@@ -426,6 +445,12 @@ export async function buildTools(
         version: string;
         hash: string;
         confirmationToken?: string;
+        binding?: {
+          sessionId: string;
+          toolUseId: string;
+          toolName: string;
+          canonicalInput: unknown;
+        };
       }): Promise<
         | {
             status: 200;
@@ -1111,6 +1136,7 @@ export async function buildTools(
           slug,
           version,
           confirmationToken: env.skillConfirmToken,
+          binding: env.skillConfirmBinding,
         });
         if (!("skill" in res)) {
           return `install_skill failed (${res.status}): ${res.error}`;
@@ -1158,6 +1184,7 @@ export async function buildTools(
           version,
           hash,
           confirmationToken: env.skillConfirmToken,
+          binding: env.skillConfirmBinding,
         });
         // `in`-narrowing: error variant's status is `number`, admits 200.
         if (!("attached" in res)) {
@@ -1169,13 +1196,50 @@ export async function buildTools(
   }
 
   // --- Web search ---
-  // Default: DuckDuckGo (free, no config). Override with explicit tool types:
+  // Default: DuckDuckGo (free, no API key required).
+  // Explicit tool types:
   //   "web_search_20250305" → Anthropic built-in server-side (Claude only)
-  //   "web_search_tavily"   → Tavily API (needs TAVILY_API_KEY)
-  const toolTypes = new Set((agentConfig.tools || []).map(t => t.type));
+  //   "web_search_tavily"   → Tavily API (requires TAVILY_API_KEY)
+  //   "web_search_ddg"      → Force DuckDuckGo
+  const toolTypes = new Set((agentConfig.tools || []).map((t) => t.type));
+  const tavilyKey =
+    env?.TAVILY_API_KEY ||
+    (typeof process !== "undefined" ? process.env?.TAVILY_API_KEY : undefined);
 
   if (toolTypes.has("web_search_20250305")) {
     tools.web_search = anthropic.tools.webSearch_20250305();
+  } else if (toolTypes.has("web_search_tavily")) {
+    tools.web_search = tool({
+      description:
+        "Search the web for information. Returns relevant search results.",
+      inputSchema: z.object({
+        query: z.string().describe("Search query"),
+        max_results: z.number().optional().describe("Max results (default 5)"),
+      }),
+      execute: safe(async ({ query, max_results }) => {
+        if (!tavilyKey)
+          return "web_search unavailable: TAVILY_API_KEY not configured";
+        const res = await fetch("https://api.tavily.com/search", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            api_key: tavilyKey,
+            query,
+            max_results: max_results || 5,
+          }),
+        });
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const data = (await res.json()) as any;
+        return JSON.stringify(
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          data.results?.map((r: any) => ({
+            title: r.title,
+            url: r.url,
+            snippet: r.content,
+          })) || data,
+        );
+      }),
+    });
   } else if (toolTypes.has("web_search_ddg") || enabled.has("web_search")) {
     // DuckDuckGo — default web search, free, no API key
     tools.web_search = tool({
@@ -1222,41 +1286,6 @@ export async function buildTools(
           }));
 
         return JSON.stringify(results);
-      }),
-    });
-  }
-
-  if (toolTypes.has("web_search_tavily")) {
-    const tavilyKey = env?.TAVILY_API_KEY;
-    tools.web_search = tool({
-      description:
-        "Search the web for information. Returns relevant search results.",
-      inputSchema: z.object({
-        query: z.string().describe("Search query"),
-        max_results: z.number().optional().describe("Max results (default 5)"),
-      }),
-      execute: safe(async ({ query, max_results }) => {
-        if (!tavilyKey)
-          return "web_search unavailable: TAVILY_API_KEY not configured";
-        const res = await fetch("https://api.tavily.com/search", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            api_key: tavilyKey,
-            query,
-            max_results: max_results || 5,
-          }),
-        });
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const data = (await res.json()) as any;
-        return JSON.stringify(
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          data.results?.map((r: any) => ({
-            title: r.title,
-            url: r.url,
-            snippet: r.content,
-          })) || data
-        );
       }),
     });
   }

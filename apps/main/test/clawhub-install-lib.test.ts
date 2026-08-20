@@ -4,6 +4,7 @@
 // Fetch is injected so no live ClawHub calls happen in tests.
 
 import { describe, it, expect } from "vitest";
+import { zipSync, strToU8 } from "fflate";
 import {
   installClawHubSkill,
   InstallValidationError,
@@ -17,34 +18,15 @@ interface ZipEntry {
   content: string;
 }
 
-/** Hand-rolled stored (method 0) zip — the extractor only walks local file
- *  headers, so no central directory is needed. */
+/** Build a real zip (local headers + central directory) so the shared
+ *  controlled parser in lib/skill-zip can decode it. The previous
+ *  hand-rolled local-header-only payload only worked because the
+ *  install path used its own minimal parser — that parser is gone
+ *  (P0 review 2026-08-20). */
 function makeZip(entries: ZipEntry[]): ArrayBuffer {
-  const enc = new TextEncoder();
-  const parts: Uint8Array[] = [];
-  for (const e of entries) {
-    const nameBytes = enc.encode(e.name);
-    const dataBytes = enc.encode(e.content);
-    const header = new DataView(new ArrayBuffer(30));
-    header.setUint32(0, 0x04034b50, true); // local file header sig
-    header.setUint16(4, 20, true); // version needed
-    header.setUint16(6, 0, true); // flags
-    header.setUint16(8, 0, true); // method: store
-    header.setUint32(14, 0, true); // crc32 (extractor ignores)
-    header.setUint32(18, dataBytes.byteLength, true); // compressed size
-    header.setUint32(22, dataBytes.byteLength, true); // uncompressed size
-    header.setUint16(26, nameBytes.byteLength, true);
-    header.setUint16(28, 0, true); // extra len
-    parts.push(new Uint8Array(header.buffer), nameBytes, dataBytes);
-  }
-  const total = parts.reduce((n, p) => n + p.byteLength, 0);
-  const out = new Uint8Array(total);
-  let off = 0;
-  for (const p of parts) {
-    out.set(p, off);
-    off += p.byteLength;
-  }
-  return out.buffer;
+  const obj: Record<string, Uint8Array> = {};
+  for (const e of entries) obj[e.name] = strToU8(e.content);
+  return zipSync(obj).buffer;
 }
 
 function makeFetch(pkg: Partial<ClawHubPackage> & { name: string }) {
@@ -79,7 +61,10 @@ function makeStores() {
   return {
     kvPuts,
     blobPuts,
-    kv: { put: async (k: string, v: string) => void kvPuts.set(k, v) },
+    kv: {
+      put: async (k: string, v: string) => void kvPuts.set(k, v),
+      get: async (k: string) => kvPuts.get(k) ?? null,
+    },
     filesBlob: { put: async (k: string, v: Uint8Array) => void blobPuts.set(k, v) },
   };
 }
@@ -107,6 +92,27 @@ describe("installClawHubSkill version pin gates (F1/SDS §2.3)", () => {
     await expect(
       installClawHubSkill({ ...BASE, version: "1.0.0", kv: s.kv, filesBlob: s.filesBlob, requireVerified: false, fetchImpl: notFound }),
     ).rejects.toBeInstanceOf(InstallNotFoundError);
+  });
+
+  it("rejects package when Content-Length exceeds MAX_ZIP_DOWNLOAD_BYTES", async () => {
+    const s = makeStores();
+    const fetchWithBigCl = (async (url: string | URL | Request): Promise<Response> => {
+      const u = String(url);
+      if (u.includes("/packages/")) {
+        return new Response(JSON.stringify({ package: { name: "test-skill", displayName: "Test", summary: "test", latestVersion: "1.0.0" } }), { status: 200 });
+      }
+      if (u.includes("/download")) {
+        return new Response("dummy", {
+          status: 200,
+          headers: { "Content-Length": "20000000" }, // 20MB
+        });
+      }
+      return new Response("nf", { status: 404 });
+    }) as typeof fetch;
+
+    await expect(
+      installClawHubSkill({ ...BASE, version: "1.0.0", kv: s.kv, filesBlob: s.filesBlob, requireVerified: false, fetchImpl: fetchWithBigCl }),
+    ).rejects.toBeInstanceOf(InstallValidationError);
   });
 });
 
@@ -158,5 +164,102 @@ describe("installClawHubSkill sha256 pinning (SDS §2.4 hash write)", () => {
 
     // zip bytes land in the blob store under the skillFileR2Key layout
     expect([...s.blobPuts.keys()][0]).toContain(`t/t-test/skills/${res.id}/`);
+  });
+});
+
+describe("installClawHubSkill idempotency (P2 review 2026-08-20)", () => {
+  it("re-install of the same (slug, version) returns the existing skill + the same id", async () => {
+    const s = makeStores();
+    const args = {
+      ...BASE,
+      version: "1.0.0",
+      kv: s.kv,
+      filesBlob: s.filesBlob,
+      requireVerified: false,
+      fetchImpl: makeFetch({ name: "test-skill" }),
+    };
+    const first = await installClawHubSkill(args);
+    const second = await installClawHubSkill(args);
+    expect(second.id).toBe(first.id);
+    expect(second.hash).toBe(first.hash);
+    // Only ONE blob was written across the two attempts.
+    const skillDirKeys = [...s.blobPuts.keys()].filter((k) => k.includes(`/skills/${first.id}/`));
+    expect(skillDirKeys.length).toBe(1);
+  });
+
+  it("explicit idempotencyKey collapses retries to a single install", async () => {
+    const s = makeStores();
+    const baseArgs = {
+      ...BASE,
+      version: "1.0.0",
+      kv: s.kv,
+      filesBlob: s.filesBlob,
+      requireVerified: false,
+      fetchImpl: makeFetch({ name: "test-skill" }),
+    };
+    const a = await installClawHubSkill({ ...baseArgs, idempotencyKey: "retry-1" });
+    const b = await installClawHubSkill({ ...baseArgs, idempotencyKey: "retry-1" });
+    expect(b.id).toBe(a.id);
+  });
+
+  it("installing a DIFFERENT version (with different artifact bytes) produces a new id", async () => {
+    // makeFetch returns the same content for every /download call (test
+    // fixture simplicity); for THIS test we want different bytes per
+    // version so the hash dedup lane doesn't collapse them. Override
+    // fetchImpl to embed the version in the zip content.
+    const fetchByVersion = (async (url: string | URL | Request): Promise<Response> => {
+      const u = String(url);
+      if (u.includes("/packages/")) {
+        return new Response(JSON.stringify({ package: { name: "test-skill", displayName: "Test Skill", summary: "test", family: "skill", latestVersion: "1.1.0", ownerHandle: "oma", isOfficial: false, verificationTier: null } }), { status: 200 });
+      }
+      if (u.includes("/download")) {
+        // Pick content off the URL so different versions produce
+        // different bytes → different sha256 → no hash dedup.
+        const v = new URL(u, "http://x").searchParams.get("version") || "x";
+        return new Response(zipSync({ "SKILL.md": strToU8(`# test skill ${v}\n`) }), { status: 200 });
+      }
+      if (u.includes("/packages")) {
+        return new Response(JSON.stringify({ items: [{ name: "test-skill", displayName: "Test Skill", summary: "test", family: "skill", latestVersion: "1.1.0", ownerHandle: "oma", isOfficial: false, verificationTier: null }] }), { status: 200 });
+      }
+      return new Response("not found", { status: 404 });
+    }) as typeof fetch;
+
+    const s = makeStores();
+    const a = await installClawHubSkill({
+      ...BASE,
+      version: "1.0.0",
+      kv: s.kv,
+      filesBlob: s.filesBlob,
+      requireVerified: false,
+      fetchImpl: fetchByVersion,
+    });
+    const b = await installClawHubSkill({
+      ...BASE,
+      version: "1.1.0",
+      kv: s.kv,
+      filesBlob: s.filesBlob,
+      requireVerified: false,
+      fetchImpl: fetchByVersion,
+    });
+    expect(b.id).not.toBe(a.id);
+    expect(b.hash).not.toBe(a.hash);
+  });
+
+  it("preserves source provenance on the persisted skill record", async () => {
+    const s = makeStores();
+    const res = await installClawHubSkill({
+      ...BASE,
+      version: "1.0.0",
+      kv: s.kv,
+      filesBlob: s.filesBlob,
+      requireVerified: false,
+      fetchImpl: makeFetch({ name: "test-skill", ownerHandle: "acme" }),
+    });
+    const skillRaw = s.kvPuts.get(`t:t-test:skill:${res.id}`)!;
+    const skill = JSON.parse(skillRaw);
+    expect(skill.source_version).toBe("1.0.0");
+    expect(skill.source_owner).toBe("acme");
+    expect(skill.source_verification_tier).toBeNull();
+    expect(skill.source_url).toMatch(/^https:\/\/clawhub\.ai\/api\/v1\/download\?slug=test-skill&version=1\.0\.0$/);
   });
 });

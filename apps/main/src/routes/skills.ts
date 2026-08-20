@@ -2,10 +2,15 @@ import { Hono } from "hono";
 import type { Env } from "@open-managed-agents/shared";
 import { generateId, skillFileR2Key } from "@open-managed-agents/shared";
 import { logWarn } from "@open-managed-agents/shared";
-import { unzipSync } from "fflate";
 import { checkUploadFreq, checkUploadSize } from "../quotas";
 import { kvKey, kvPrefix, kvListAll } from "../kv-helpers";
 import { mintSkillConfirmation } from "../lib/skill-confirmation";
+import {
+  parseSkillZipBytes,
+  SkillZipError,
+  type ParsedSkillZip,
+  type SkillFileInput,
+} from "../lib/skill-zip";
 import type { Services } from "@open-managed-agents/services";
 import type { BlobStore } from "@open-managed-agents/blob-store";
 
@@ -15,12 +20,8 @@ const app = new Hono<{ Bindings: Env; Variables: { tenant_id: string; services: 
 // Types
 // ---------------------------------------------------------------------------
 
-interface SkillFileInput {
-  filename: string;
-  content: string;
-  /** "utf8" (default) for text, "base64" for binary (images, fonts, archives) */
-  encoding?: "utf8" | "base64";
-}
+// SkillFileInput + ParsedSkillZip now come from `lib/skill-zip` so the
+// upload + ClawHub install paths share one envelope (P0 review 2026-08-20).
 
 interface SkillFileEntry {
   filename: string;
@@ -252,160 +253,13 @@ function validateFiles(files: SkillFileInput[]): string | null {
 }
 
 // ---------------------------------------------------------------------------
-// Zip handling — accept a packaged skill folder and convert to the same
-// SkillFileInput[] shape the JSON endpoint already consumes. Strips the
-// common top-level directory (Anthropic-style `my-skill/SKILL.md`),
-// filters platform junk, and classifies each file as utf8 vs base64 by
-// strict TextDecoder.
+// Zip handling — delegates to the shared controlled parser. See
+// `apps/main/src/lib/skill-zip.ts` for the full security contract
+// (path-traversal guard, zip-bomb limits, SKILL.md requirement, and
+// binary-vs-utf8 classification). The route used to carry its own copy
+// of the parser; the P0 review 2026-08-20 collapsed the two paths
+// onto one envelope so install_skill and upload cannot diverge.
 // ---------------------------------------------------------------------------
-
-const IGNORED_BASENAMES = new Set([".DS_Store", "Thumbs.db"]);
-const IGNORED_PREFIXES = ["__MACOSX/", ".git/", ".idea/", ".vscode/"];
-
-function zipEntryIgnored(path: string): boolean {
-  if (IGNORED_PREFIXES.some((p) => path.startsWith(p) || path.includes(`/${p}`))) return true;
-  const base = path.split("/").pop() || "";
-  if (IGNORED_BASENAMES.has(base)) return true;
-  if (base.startsWith("._")) return true;
-  return false;
-}
-
-function commonRootPrefix(paths: string[]): string {
-  if (paths.length === 0) return "";
-  const firstSlash = paths[0].indexOf("/");
-  if (firstSlash < 0) return "";
-  const candidate = paths[0].slice(0, firstSlash + 1);
-  return paths.every((p) => p.startsWith(candidate)) ? candidate : "";
-}
-
-function formatBytesHuman(n: number): string {
-  if (n < 1024) return `${n} B`;
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
-  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
-}
-
-function bytesToBase64Str(bytes: Uint8Array): string {
-  let bin = "";
-  const CHUNK = 8192;
-  for (let i = 0; i < bytes.length; i += CHUNK) {
-    bin += String.fromCharCode.apply(
-      null,
-      bytes.subarray(i, i + CHUNK) as unknown as number[],
-    );
-  }
-  return btoa(bin);
-}
-
-function tryDecodeUtf8(bytes: Uint8Array): string | null {
-  try {
-    return new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(bytes);
-  } catch {
-    return null;
-  }
-}
-
-interface ParsedSkillZip {
-  files: SkillFileInput[];
-  name?: string;
-  description?: string;
-}
-
-/** Caps applied during unzip to defend against zip-bombs. The dialed limits
- *  are deliberately generous — the largest legitimate Anthropic-style skill
- *  observed in the field is ~5 MB / ~100 files, so 100 MB / 25 MB per file /
- *  500 files leaves ~20× headroom. A maliciously crafted zip can declare
- *  multi-GB uncompressed sizes from a kilobyte payload; we reject as soon
- *  as the central-directory metadata exceeds these limits, before
- *  decompression actually runs. */
-const ZIP_MAX_TOTAL_UNCOMPRESSED = 100 * 1024 * 1024;
-const ZIP_MAX_FILE_UNCOMPRESSED = 25 * 1024 * 1024;
-const ZIP_MAX_FILE_COUNT = 500;
-
-class ZipLimitError extends Error {}
-
-function parseSkillZipBytes(bytes: Uint8Array): ParsedSkillZip {
-  let entries: Record<string, Uint8Array>;
-  try {
-    let totalUncompressed = 0;
-    let count = 0;
-    entries = unzipSync(bytes, {
-      filter: (file) => {
-        // Skip directory entries and platform junk before they count
-        // against the budget — fflate would otherwise call us for every
-        // __MACOSX/* entry.
-        if (file.name.endsWith("/") || zipEntryIgnored(file.name)) return false;
-        count++;
-        if (count > ZIP_MAX_FILE_COUNT) {
-          throw new ZipLimitError(
-            `Zip has too many files (>${ZIP_MAX_FILE_COUNT}); refusing to process`,
-          );
-        }
-        if (file.originalSize > ZIP_MAX_FILE_UNCOMPRESSED) {
-          throw new ZipLimitError(
-            `File "${file.name}" is ${formatBytesHuman(file.originalSize)} uncompressed; per-file limit is ${formatBytesHuman(ZIP_MAX_FILE_UNCOMPRESSED)}`,
-          );
-        }
-        totalUncompressed += file.originalSize;
-        if (totalUncompressed > ZIP_MAX_TOTAL_UNCOMPRESSED) {
-          throw new ZipLimitError(
-            `Zip uncompressed size exceeds ${formatBytesHuman(ZIP_MAX_TOTAL_UNCOMPRESSED)} (zip-bomb defense)`,
-          );
-        }
-        return true;
-      },
-    });
-  } catch (err) {
-    if (err instanceof ZipLimitError) throw err;
-    throw new Error(
-      `Could not read zip: ${err instanceof Error ? err.message : "unknown error"}`,
-    );
-  }
-
-  // fflate's filter already dropped directory + ignored entries; what
-  // remains is the actual skill payload.
-  const usable = Object.entries(entries);
-  if (usable.length === 0) {
-    throw new Error("Zip is empty (after filtering metadata files)");
-  }
-
-  const prefix = commonRootPrefix(usable.map(([p]) => p));
-  const stripped = usable.map(([path, data]) => ({
-    path: prefix ? path.slice(prefix.length) : path,
-    bytes: data,
-  }));
-
-  const skillMd = stripped.find((e) => e.path.toLowerCase() === "skill.md");
-  if (!skillMd) {
-    throw new Error(
-      "Zip must contain SKILL.md at the root (or a single top-level folder containing it)",
-    );
-  }
-  const skillMdText = tryDecodeUtf8(skillMd.bytes);
-  if (skillMdText === null) {
-    throw new Error("SKILL.md must be UTF-8 text");
-  }
-
-  const files: SkillFileInput[] = [];
-  for (const entry of stripped) {
-    if (!entry.path) continue;
-    const decoded =
-      entry.path === skillMd.path
-        ? skillMdText
-        : tryDecodeUtf8(entry.bytes);
-    if (decoded !== null) {
-      files.push({ filename: entry.path, content: decoded, encoding: "utf8" });
-    } else {
-      files.push({
-        filename: entry.path,
-        content: bytesToBase64Str(entry.bytes),
-        encoding: "base64",
-      });
-    }
-  }
-
-  const { name, description } = parseFrontmatter(skillMdText);
-  return { files, name, description };
-}
 
 
 
@@ -921,14 +775,41 @@ app.delete("/:id/versions/:version", async (c) => {
 // agent-side tool forwards it to SkillRpc, which consumes it exactly once.
 app.post("/confirmation", async (c) => {
   const t = c.get("tenant_id");
-  const body = await c.req.json<{ purpose?: string }>().catch(() => ({}) as { purpose?: string });
+  const body = await c.req
+    .json<{
+      purpose?: string;
+      session_id?: string;
+      tool_use_id?: string;
+      tool_name?: string;
+      input?: unknown;
+    }>()
+    .catch(() => ({} as {
+      purpose?: string;
+      session_id?: string;
+      tool_use_id?: string;
+      tool_name?: string;
+      input?: unknown;
+    }));
   if (body.purpose !== "install" && body.purpose !== "attach") {
     return c.json({ error: "purpose must be 'install' or 'attach'" }, 400);
   }
+  if (!body.session_id || !body.tool_use_id || !body.tool_name) {
+    return c.json(
+      { error: "session_id, tool_use_id, and tool_name are required for confirmation binding" },
+      400,
+    );
+  }
+  const binding = {
+    sessionId: body.session_id,
+    toolUseId: body.tool_use_id,
+    toolName: body.tool_name,
+    canonicalInput: body.input ?? {},
+  };
   const res = await mintSkillConfirmation({
     kv: c.var.services.kv,
     tenantId: t,
     purpose: body.purpose,
+    binding,
   });
   return c.json({ confirmation_token: res.token, expires_in: res.expires_in }, 201);
 });

@@ -4,8 +4,8 @@
 // data and enforce identical policies.
 
 import { generateId, skillFileR2Key } from "@open-managed-agents/shared";
-import { logWarn } from "@open-managed-agents/shared";
 import { kvKey } from "../kv-helpers";
+import { parseSkillZipBytesRaw, SkillZipError } from "./skill-zip";
 
 export const CLAWHUB_BASE = "https://clawhub.ai/api/v1";
 
@@ -36,11 +36,14 @@ export interface ClawHubSkill {
   downloads: number;
 }
 
-export async function searchClawHubSkills(q: string): Promise<ClawHubSkill[]> {
-  const res = await fetch(`${CLAWHUB_BASE}/packages${q ? `?q=${encodeURIComponent(q)}` : ""}`);
+export async function searchClawHubSkills(
+  q: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<ClawHubSkill[]> {
+  const res = await fetchImpl(`${CLAWHUB_BASE}/packages${q ? `?q=${encodeURIComponent(q)}` : ""}`);
   if (!res.ok) throw new Error(`ClawHub search failed: ${res.status}`);
   const body = (await res.json()) as { items: ClawHubPackage[] };
-  return (body.items || [])
+  const all = (body.items || [])
     .filter((p) => p.family === "skill")
     .map((p) => ({
       slug: p.name,
@@ -52,7 +55,28 @@ export async function searchClawHubSkills(q: string): Promise<ClawHubSkill[]> {
       verification_tier: p.verificationTier ?? null,
       downloads: p.stats?.downloads ?? 0,
     }));
+
+  // P1 review 2026-08-20: the upstream registry currently ignores `q`
+  // and serves the same 25 items regardless of query. Filter locally
+  // on slug/name/description so the tool never returns an irrelevant
+  // result set, and cap the result count so the LLM context stays
+  // bounded. Empty q = full catalog up to the cap.
+  const tokens = q.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  const filtered =
+    tokens.length === 0
+      ? all
+      : all.filter((s) => {
+          const haystack = `${s.slug} ${s.name} ${s.description}`.toLowerCase();
+          return tokens.every((t) => haystack.includes(t));
+        });
+  return filtered.slice(0, SEARCH_MAX_RESULTS);
 }
+
+/** Hard cap on results returned to the LLM. 50 is generous for the
+ *  catalog size observed 2026-08-20 (ClawHub publishes ~25 skills)
+ *  while keeping the tool result well under any reasonable context
+ *  budget. */
+export const SEARCH_MAX_RESULTS = 50;
 
 /**
  * SDS agent-self-install §2.4 — supply-chain source policy.
@@ -96,9 +120,62 @@ export interface InstalledSkill {
 }
 
 /** Minimal structural deps so tests inject fakes without pulling the
- *  services package. Shape matches Services.kv / Services.filesBlob put(). */
-interface PutOnlyStore {
-  put(key: string, value: string | Uint8Array): Promise<unknown>;
+ *  services package. Separated into SkillKvStore and SkillBlobWriter
+ *  to conform with BlobStore and KV contracts without TS2322 errors. */
+export interface SkillKvStore {
+  get(key: string): Promise<string | null>;
+  put(key: string, value: string, opts?: { expirationTtl?: number }): Promise<unknown>;
+}
+
+export interface SkillBlobWriter {
+  put(key: string, value: any, opts?: any): Promise<unknown>;
+}
+
+export const MAX_ZIP_DOWNLOAD_BYTES = 10 * 1024 * 1024; // 10MB cap on compressed package
+
+async function readLimitedArrayBuffer(res: Response, maxBytes: number): Promise<ArrayBuffer> {
+  const cl = res.headers.get("content-length");
+  if (cl) {
+    const declared = parseInt(cl, 10);
+    if (!Number.isNaN(declared) && declared > maxBytes) {
+      throw new InstallValidationError(
+        `Skill package exceeds maximum compressed size limit (${maxBytes} bytes)`,
+      );
+    }
+  }
+  if (!res.body) {
+    const buf = await res.arrayBuffer();
+    if (buf.byteLength > maxBytes) {
+      throw new InstallValidationError(
+        `Skill package exceeds maximum compressed size limit (${maxBytes} bytes)`,
+      );
+    }
+    return buf;
+  }
+  const reader = res.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (value) {
+      total += value.byteLength;
+      if (total > maxBytes) {
+        await reader.cancel();
+        throw new InstallValidationError(
+          `Skill package exceeds maximum compressed size limit (${maxBytes} bytes)`,
+        );
+      }
+      chunks.push(value);
+    }
+  }
+  const result = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    result.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return result.buffer;
 }
 
 export class InstallValidationError extends Error {}
@@ -119,6 +196,13 @@ export function installInputError(slug: string, version: string): string | null 
   return null;
 }
 
+async function deterministicSkillId(slug: string, version?: string): Promise<string> {
+  const sanitizedSlug = slug.toLowerCase().replace(/[^a-z0-9_-]/g, "_").slice(0, 24);
+  const rawKey = `${slug}@${version || "latest"}`;
+  const hex = await sha256Hex(new TextEncoder().encode(rawKey));
+  return `skill_ch_${sanitizedSlug}_${hex.slice(0, 12)}`;
+}
+
 /**
  * Install a ClawHub skill into the tenant's library: version must be an
  * explicit pin (never "latest" — F1/SDS §2.3), source must pass the
@@ -126,14 +210,23 @@ export function installInputError(slug: string, version: string): string | null 
  * KV. Throws InstallValidationError (caller → 400), InstallSourceError
  * (→ 403), Error (→ 502) — the HTTP route and SkillRpc map these to the
  * same statuses.
+ *
+ * Idempotency (P2 review 2026-08-20): if a caller passes
+ * `idempotencyKey`, we look up `kvKey(tenant, "skillidem", key)` and
+ * return the prior install when present — covering the "RPC succeeded
+ * but the response was lost" retry case. With no explicit key we
+ * derive one from `tenant:source:slug:source_version` so duplicate
+ * installs of the same pinned artifact collapse to one Skill row.
  */
 export async function installClawHubSkill(args: {
   tenantId: string;
   slug: string;
   version: string;
-  kv: PutOnlyStore;
-  filesBlob: PutOnlyStore | null;
+  kv: SkillKvStore;
+  filesBlob: SkillBlobWriter | null;
   requireVerified: boolean;
+  /** Optional caller-supplied retry token (UUID, hash, etc.). */
+  idempotencyKey?: string;
   /** DI seam for tests — defaults to global fetch. */
   fetchImpl?: typeof fetch;
 }): Promise<InstalledSkill> {
@@ -141,6 +234,40 @@ export async function installClawHubSkill(args: {
   const inputError = installInputError(args.slug, args.version);
   if (inputError) throw new InstallValidationError(inputError);
   if (!args.filesBlob) throw new InstallConfigError("FILES_BUCKET binding not configured");
+
+  // 0. Idempotency short-circuit — BEFORE any network call so a retried
+  // request never re-downloads the zip or re-mints a skill id.
+  const idemKey = args.idempotencyKey
+    ? `key:${args.idempotencyKey}`
+    : `src:${args.slug}:${args.version}`;
+  const idemKvKey = kvKey(args.tenantId, "skillidem", idemKey);
+  const existingId = await args.kv.get(idemKvKey);
+  if (existingId) {
+    const existingSkillRaw = await args.kv.get(kvKey(args.tenantId, "skill", existingId));
+    if (existingSkillRaw) {
+      const existing = JSON.parse(existingSkillRaw) as {
+        id: string;
+        display_title: string;
+        name: string;
+        description: string;
+        latest_version: string;
+        clawhub_slug: string;
+      };
+      const verRaw = await args.kv.get(
+        kvKey(args.tenantId, "skillver", existingId, existing.latest_version),
+      );
+      const ver = verRaw ? (JSON.parse(verRaw) as { hash: string }) : null;
+      return {
+        id: existing.id,
+        display_title: existing.display_title,
+        name: existing.name,
+        description: existing.description,
+        latest_version: existing.latest_version,
+        clawhub_slug: existing.clawhub_slug,
+        hash: ver?.hash ?? "",
+      };
+    }
+  }
 
   // 1. Package metadata + supply-chain gate
   const metaRes = await fetchImpl(`${CLAWHUB_BASE}/packages/${encodeURIComponent(args.slug)}`);
@@ -154,47 +281,95 @@ export async function installClawHubSkill(args: {
   }
   assertInstallSourceAllowed(pkg, args.requireVerified);
 
-  // 2. Download zip — hash the artifact AS DISTRIBUTED before extraction
+  // 2. Download zip — check size limit before full extraction
   const dlRes = await fetchImpl(
     `${CLAWHUB_BASE}/download?slug=${encodeURIComponent(args.slug)}&version=${encodeURIComponent(args.version)}`,
   );
   if (!dlRes.ok) throw new Error(`Failed to download skill: ${dlRes.status}`);
-  const zipBuf = await dlRes.arrayBuffer();
+  const zipBuf = await readLimitedArrayBuffer(dlRes, MAX_ZIP_DOWNLOAD_BYTES);
   const hash = await sha256Hex(new Uint8Array(zipBuf));
 
-  // 3. Extract + persist
-  const files = await extractZipFiles(zipBuf);
+  // Re-check the idempotency map AFTER the hash is computed — covers
+  // the case where the prior attempt downloaded the same bytes but
+  // crashed before writing the idem pointer.
+  const existingByHash = await args.kv.get(
+    kvKey(args.tenantId, "skillidem", `hash:${args.slug}:${hash}`),
+  );
+  if (existingByHash) {
+    // Same pattern as above — return the existing record.
+    const existingSkillRaw = await args.kv.get(
+      kvKey(args.tenantId, "skill", existingByHash),
+    );
+    if (existingSkillRaw) {
+      await args.kv.put(idemKvKey, existingByHash);
+      const existing = JSON.parse(existingSkillRaw) as {
+        id: string;
+        display_title: string;
+        name: string;
+        description: string;
+        latest_version: string;
+        clawhub_slug: string;
+      };
+      return {
+        id: existing.id,
+        display_title: existing.display_title,
+        name: existing.name,
+        description: existing.description,
+        latest_version: existing.latest_version,
+        clawhub_slug: existing.clawhub_slug,
+        hash,
+      };
+    }
+  }
+
+  // 3. Extract + persist via the shared controlled ZIP parser
+  let parsed;
+  try {
+    parsed = parseSkillZipBytesRaw(new Uint8Array(zipBuf));
+  } catch (err) {
+    if (err instanceof SkillZipError) {
+      // Map parser errors to validation lane — caller surfaces as 400.
+      throw new InstallValidationError(err.message);
+    }
+    throw err;
+  }
+  const files = parsed.files;
   if (files.length === 0) throw new Error("Downloaded zip contains no files");
 
   const skillName = (pkg.displayName || pkg.name).toLowerCase().replace(/[^a-z0-9-]/g, "-").slice(0, 64);
-  const id = `skill_${generateId()}`;
-  const versionId = Date.now().toString();
+  const id = await deterministicSkillId(args.slug, args.version);
+  const versionId = args.version || Date.now().toString();
   const now = new Date().toISOString();
 
-  const manifest: Array<{ filename: string; size_bytes: number; encoding: "utf8" }> = [];
+  // Write file contents to R2 first
+  const manifest: Array<{ filename: string; size_bytes: number; encoding: "utf8" | "base64" }> = [];
   for (const f of files) {
-    const bytes = new TextEncoder().encode(f.content);
-    await args.filesBlob.put(skillFileR2Key(args.tenantId, id, versionId, f.filename), bytes);
-    manifest.push({ filename: f.filename, size_bytes: bytes.byteLength, encoding: "utf8" });
+    await args.filesBlob.put(skillFileR2Key(args.tenantId, id, versionId, f.filename), f.bytes);
+    manifest.push({ filename: f.filename, size_bytes: f.bytes.byteLength, encoding: f.encoding });
   }
 
   const skill = {
     id,
     display_title: pkg.displayName || pkg.name,
     name: skillName,
-    description: pkg.summary || "",
+    description: parsed.description ?? pkg.summary ?? "",
     source: "custom" as const,
     latest_version: versionId,
     created_at: now,
     clawhub_slug: args.slug,
+    source_version: args.version,
+    source_owner: pkg.ownerHandle,
+    source_verification_tier: pkg.verificationTier ?? null,
+    source_url: `${CLAWHUB_BASE}/download?slug=${encodeURIComponent(args.slug)}&version=${encodeURIComponent(args.version)}`,
   };
-  // skill_versions manifest carries the pinned sha256 — attach_skill (F4)
-  // re-checks the caller's hash against this value.
   const version = { version: versionId, files: manifest, created_at: now, hash };
 
+  // Write version manifest first, then main skill record, then idempotency pointers
+  await args.kv.put(kvKey(args.tenantId, "skillver", id, versionId), JSON.stringify(version));
+  await args.kv.put(kvKey(args.tenantId, "skill", id), JSON.stringify(skill));
   await Promise.all([
-    args.kv.put(kvKey(args.tenantId, "skill", id), JSON.stringify(skill)),
-    args.kv.put(kvKey(args.tenantId, "skillver", id, versionId), JSON.stringify(version)),
+    args.kv.put(idemKvKey, id),
+    args.kv.put(kvKey(args.tenantId, "skillidem", `hash:${args.slug}:${hash}`), id),
   ]);
 
   return { ...skill, hash };
@@ -203,62 +378,4 @@ export async function installClawHubSkill(args: {
 async function sha256Hex(bytes: Uint8Array): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", bytes);
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
-}
-
-/**
- * Extract text files from a zip ArrayBuffer.
- * Minimal zip parser — handles Store (0) and Deflate (8) methods.
- */
-async function extractZipFiles(buf: ArrayBuffer): Promise<Array<{ filename: string; content: string }>> {
-  const view = new DataView(buf);
-  const files: Array<{ filename: string; content: string }> = [];
-  let offset = 0;
-
-  while (offset < buf.byteLength - 4) {
-    const sig = view.getUint32(offset, true);
-    if (sig !== 0x04034b50) break; // Local file header signature
-
-    const compressionMethod = view.getUint16(offset + 8, true);
-    const compressedSize = view.getUint32(offset + 18, true);
-    const nameLen = view.getUint16(offset + 26, true);
-    const extraLen = view.getUint16(offset + 28, true);
-
-    const nameBytes = new Uint8Array(buf, offset + 30, nameLen);
-    const filename = new TextDecoder().decode(nameBytes);
-
-    const dataStart = offset + 30 + nameLen + extraLen;
-    const rawData = new Uint8Array(buf, dataStart, compressedSize);
-
-    if (!filename.endsWith("/") && !filename.startsWith("__MACOSX")) {
-      try {
-        let content: string;
-        if (compressionMethod === 8) {
-          // Deflate
-          const ds = new DecompressionStream("deflate-raw");
-          const writer = ds.writable.getWriter();
-          writer.write(rawData).catch((err) => {
-            logWarn({ op: "clawhub.zip.deflate_write", err }, "deflate write failed");
-          });
-          writer.close().catch((err) => {
-            logWarn({ op: "clawhub.zip.deflate_close", err }, "deflate close failed");
-          });
-          const decompressed = new Response(ds.readable);
-          content = await decompressed.text();
-        } else {
-          content = new TextDecoder().decode(rawData);
-        }
-        files.push({ filename, content });
-      } catch (err) {
-        // Skip files that fail to decompress — preserve the rest of the zip.
-        logWarn(
-          { op: "clawhub.zip.entry_decompress", filename, err },
-          "skipped unreadable zip entry",
-        );
-      }
-    }
-
-    offset = dataStart + compressedSize;
-  }
-
-  return files;
 }

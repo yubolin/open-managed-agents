@@ -27,6 +27,19 @@ export const CONFIRMATION_TTL_SECONDS = 60;
 
 export type ConfirmationPurpose = "install" | "attach";
 
+/** The shape of the call the token authorizes (P1 review 2026-08-20).
+ *  Storing a canonical hash of this object at mint time and re-hashing
+ *  on consume gives the server proof that the user approved THIS
+ *  specific call — not just "some install / some attach". */
+export interface ConfirmationBinding {
+  sessionId: string;
+  toolUseId: string;
+  toolName: string;
+  /** Caller-normalized tool input. Object key order MUST NOT affect
+   *  the hash (canonical JSON serialization handles this). */
+  canonicalInput: unknown;
+}
+
 export class ConfirmationRequiredError extends Error {
   constructor(message = "confirmation required or expired") {
     super(message);
@@ -47,17 +60,53 @@ function randomTokenHex(): string {
   return [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
+/** Stable JSON serialization with sorted keys at every depth. The hash
+ *  is order-insensitive so the caller doesn't have to remember which
+ *  order to put `{slug, version}` in. */
+function canonicalJsonStringify(value: unknown): string {
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) {
+    return "[" + value.map((v) => canonicalJsonStringify(v)).join(",") + "]";
+  }
+  const keys = Object.keys(value as Record<string, unknown>).sort();
+  return (
+    "{" +
+    keys
+      .map((k) => JSON.stringify(k) + ":" + canonicalJsonStringify((value as Record<string, unknown>)[k]))
+      .join(",") +
+    "}"
+  );
+}
+
+async function bindingHash(binding: ConfirmationBinding): Promise<string> {
+  const enc = new TextEncoder().encode(canonicalJsonStringify(binding));
+  const digest = await crypto.subtle.digest("SHA-256", enc);
+  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
 export async function mintSkillConfirmation(args: {
   kv: ConfirmationKv;
   tenantId: string;
   purpose: ConfirmationPurpose;
+  /** P1 review 2026-08-20: bind the token to the exact call shape so
+   *  approve-and-replay-of-different-args is rejected at consume. */
+  binding?: ConfirmationBinding;
   /** DI seam for tests — defaults to the platform crypto. */
   randomId?: () => string;
 }): Promise<{ token: string; expires_in: number }> {
   const token = args.randomId ? args.randomId() : randomTokenHex();
-  await args.kv.put(kvKey(args.tenantId, "skillconf", token), JSON.stringify({ purpose: args.purpose }), {
-    expirationTtl: CONFIRMATION_TTL_SECONDS,
-  });
+  const payload: Record<string, unknown> = { purpose: args.purpose };
+  if (args.binding) {
+    payload.session_id = args.binding.sessionId;
+    payload.tool_use_id = args.binding.toolUseId;
+    payload.tool_name = args.binding.toolName;
+    payload.canonical_input_hash = await bindingHash(args.binding);
+  }
+  await args.kv.put(
+    kvKey(args.tenantId, "skillconf", token),
+    JSON.stringify(payload),
+    { expirationTtl: CONFIRMATION_TTL_SECONDS },
+  );
   return { token, expires_in: CONFIRMATION_TTL_SECONDS };
 }
 
@@ -66,6 +115,9 @@ export async function consumeSkillConfirmation(args: {
   tenantId: string;
   token: string | undefined;
   purpose: ConfirmationPurpose;
+  /** Required when the token was minted with a binding. Omitting it
+   *  on a binding-bound token MUST fail closed. */
+  binding?: ConfirmationBinding;
 }): Promise<void> {
   if (!args.token) throw new ConfirmationRequiredError();
   const key = kvKey(args.tenantId, "skillconf", args.token);
@@ -74,8 +126,27 @@ export async function consumeSkillConfirmation(args: {
   // and cross-purpose uniformly — the SDS deliberately does not
   // distinguish these to the caller (403 either way, no oracle).
   if (!raw) throw new ConfirmationRequiredError();
-  const parsed = JSON.parse(raw) as { purpose?: string };
+  const parsed = JSON.parse(raw) as {
+    purpose?: string;
+    session_id?: string;
+    tool_use_id?: string;
+    tool_name?: string;
+    canonical_input_hash?: string;
+  };
   if (parsed.purpose !== args.purpose) throw new ConfirmationRequiredError();
+  // Binding check (fail closed). If the token was minted with a binding,
+  // the consumer MUST pass one too, AND every field must match.
+  if (parsed.canonical_input_hash) {
+    if (!args.binding) throw new ConfirmationRequiredError();
+    if (parsed.session_id !== args.binding.sessionId) throw new ConfirmationRequiredError();
+    if (parsed.tool_use_id !== args.binding.toolUseId) throw new ConfirmationRequiredError();
+    if (parsed.tool_name !== args.binding.toolName) throw new ConfirmationRequiredError();
+    const provided = await bindingHash(args.binding);
+    if (provided !== parsed.canonical_input_hash) throw new ConfirmationRequiredError();
+  } else if (args.binding) {
+    // Token minted without binding but consumer passed one — fail closed.
+    throw new ConfirmationRequiredError();
+  }
   await args.kv.delete(key); // single-use
 }
 
@@ -86,6 +157,7 @@ export async function skillConfirmationGuard(args: {
   tenantId: string;
   token: string | undefined;
   purpose: ConfirmationPurpose;
+  binding?: ConfirmationBinding;
   /** Raw OMA_SKILL_ADMIN_ALLOWLIST env value (comma-separated tenant ids). */
   adminAllowlist?: string;
 }): Promise<void> {

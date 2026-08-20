@@ -1,12 +1,17 @@
 import type { Client } from "../client.js";
-import type { AgentDetail, AgentSummary, PaginatedResponse } from "../types.js";
+import type {
+  AgentDetail,
+  AgentSummary,
+  PaginatedResponse,
+  SkillConfig,
+} from "../types.js";
 
 export interface CreateAgentInput {
   name: string;
-  model: string;
+  model: string | { id: string; speed?: string };
   system: string;
   tools?: unknown[];
-  skills?: string[];
+  skills?: SkillConfig[];
   mcp_servers?: unknown[];
   description?: string;
   metadata?: Record<string, unknown>;
@@ -14,13 +19,15 @@ export interface CreateAgentInput {
 
 export interface UpdateAgentInput {
   name?: string;
-  model?: string;
+  model?: string | { id: string; speed?: string };
   system?: string;
   tools?: unknown[];
-  skills?: string[];
+  skills?: SkillConfig[];
   mcp_servers?: unknown[];
   description?: string | null;
   metadata?: Record<string, unknown>;
+  /** Required when updating skills or relying on optimistic concurrency (etag). */
+  version?: number;
 }
 
 export interface ListAgentsOptions {
