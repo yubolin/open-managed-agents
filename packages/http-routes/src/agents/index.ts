@@ -397,6 +397,19 @@ export function buildAgentRoutes(deps: AgentRoutesDeps) {
       appendable_prompts: raw._oma?.appendable_prompts,
     };
 
+    // Optimistic concurrency (SDS agent-self-install §2.5): the agent row's
+    // `version` is the etag. An update without it races silently — demand a
+    // re-read instead of guessing.
+    if (body.version === undefined || body.version === null) {
+      return c.json(
+        {
+          error:
+            "version is required for updates (optimistic concurrency); re-read the agent and retry",
+        },
+        428,
+      );
+    }
+
     if (deps.validateAgentLimits) {
       const limitCheck = deps.validateAgentLimits(body);
       if (!limitCheck.ok) return c.json({ error: limitCheck.error }, 400);
