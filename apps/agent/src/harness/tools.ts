@@ -22,8 +22,12 @@ import type { BrowserHarness, BrowserBillingHook } from "@open-managed-agents/br
 // mis-typed events.
 /** Tools enabled by default when an agent has no explicit tools config.
  *  Excludes opt-in tools that bias the LLM away from cheaper alternatives
- *  — see OPT_IN_TOOLS below. */
-export const DEFAULT_TOOLS = ["bash", "read", "write", "edit", "glob", "grep", "web_fetch", "web_search", "schedule", "cancel_schedule", "list_schedules"];
+ *  — see OPT_IN_TOOLS below.
+ *  `search_skill` is capability-gated: registered only when the platform
+ *  hands buildTools a skillRpc channel (CF service binding). On Node
+ *  self-host the name is recognised but never registered — no silent
+ *  fake (agent self-install SDS §2.7). */
+export const DEFAULT_TOOLS = ["bash", "read", "write", "edit", "glob", "grep", "web_fetch", "web_search", "search_skill", "schedule", "cancel_schedule", "list_schedules"];
 
 /** Tools recognised but NOT registered by default — agents must opt in
  *  via tools config (`{ name: "browser", enabled: true }`).
@@ -375,6 +379,21 @@ export async function buildTools(
     mcpFetch?: (server: { name: string; url: string; authorization_token?: string }) => typeof fetch;
     tenantId?: string;
     sessionId?: string;
+    /** Skill self-service channel (agent self-install SDS §2.1). CF wires
+     *  this to the SKILL_RPC WorkerEntrypoint binding on SessionDO; the
+     *  ClawHub registry call executes in the main worker so the agent
+     *  never holds a platform API key. Absent (Node self-host) disables
+     *  skill tool registration entirely — the tools are NOT silently
+     *  faked (SDS §2.7). */
+    skillRpc?: {
+      skillSearch(opts: {
+        tenantId: string;
+        q?: string;
+      }): Promise<
+        | { status: 200; results: Array<Record<string, unknown>> }
+        | { status: number; error: string }
+      >;
+    };
     watchBackgroundTask?: (taskId: string, pid: string, outputFile: string, proc: ProcessHandle | null) => void;
     /** Browser tool factory. CF wires the @cloudflare/playwright adapter,
      *  Node self-host wires the playwright-core adapter (or CDP, or the
@@ -983,6 +1002,37 @@ export async function buildTools(
         "List all pending wakeup schedules for THIS session: id, fire_at, cron (if recurring), prompt, kind.",
       inputSchema: z.object({}),
       execute: safe(async () => ({ schedules: env.listWakeups!() })),
+    });
+  }
+
+  // --- Skill registry search (agent self-install SDS §2.1, F2) ---
+  // Read-only ClawHub search over the platform's SkillRpc service binding.
+  // Use THIS tool — not web_search — when looking for installable skills:
+  // results come straight from the registry (slug, version, owner,
+  // verification_tier). An empty results array means nothing matched;
+  // never invent or recommend skills that are not in the results
+  // (appendix B layer 2: no fabricated "reference skills").
+  // Registered only when the binding exists — Node self-host gets no
+  // tool at all rather than a silent fake (SDS §2.7).
+  if (env?.skillRpc && enabled.has("search_skill")) {
+    tools.search_skill = tool({
+      description:
+        "Search the ClawHub skill registry for installable skills. Use this — not web_search — " +
+        "when the user wants to find, install, or extend agent skills. Returns real registry " +
+        "entries (slug, name, description, version, owner, verification_tier, downloads). " +
+        "An empty results array means nothing matched — do not invent skills that are not in the results.",
+      inputSchema: z.object({
+        q: z.string().max(200).optional().describe("Search query (optional — omit to list registry skills)"),
+      }),
+      execute: safe(async ({ q }) => {
+        const res = await env.skillRpc!.skillSearch({ tenantId: env.tenantId || "", q });
+        // `in`-narrowing: status alone doesn't discriminate the union
+        // (the error variant's status is `number`, which admits 200).
+        if (!("results" in res)) {
+          return `ClawHub search failed (${res.status}): ${res.error}`;
+        }
+        return { results: res.results };
+      }),
     });
   }
 

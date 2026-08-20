@@ -4,37 +4,17 @@ import { logWarn } from "@open-managed-agents/shared";
 import type { Services } from "@open-managed-agents/services";
 import { kvKey } from "../kv-helpers";
 import { generateId, skillFileR2Key } from "@open-managed-agents/shared";
+import { CLAWHUB_BASE, searchClawHubSkills, type ClawHubPackage } from "../lib/clawhub";
 
 const app = new Hono<{ Bindings: Env; Variables: { tenant_id: string; services: Services } }>();
 
-const CLAWHUB_BASE = "https://clawhub.ai/api/v1";
-
-interface ClawHubPackage {
-  name: string;
-  displayName: string;
-  summary: string;
-  family: string;
-  latestVersion: string;
-  ownerHandle: string;
-}
-
 // GET /v1/clawhub/search?q=xxx — search ClawHub registry
 app.get("/search", async (c) => {
-  const q = c.req.query("q") || "";
-  const res = await fetch(`${CLAWHUB_BASE}/packages${q ? `?q=${encodeURIComponent(q)}` : ""}`);
-  if (!res.ok) return c.json({ error: `ClawHub search failed: ${res.status}` }, 502);
-  const body = (await res.json()) as { items: ClawHubPackage[] };
-  // Filter to skills only
-  const skills = (body.items || [])
-    .filter((p) => p.family === "skill")
-    .map((p) => ({
-      slug: p.name,
-      name: p.displayName || p.name,
-      description: p.summary || "",
-      version: p.latestVersion,
-      owner: p.ownerHandle,
-    }));
-  return c.json({ data: skills });
+  try {
+    return c.json({ data: await searchClawHubSkills(c.req.query("q") || "") });
+  } catch (err) {
+    return c.json({ error: err instanceof Error ? err.message : "ClawHub search failed" }, 502);
+  }
 });
 
 // POST /v1/clawhub/install — install a skill from ClawHub

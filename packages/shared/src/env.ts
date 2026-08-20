@@ -203,6 +203,24 @@ export interface Env {
      */
     fetch(request: Request): Promise<Response>;
   };
+  // WorkerEntrypoint RPC binding from the agent worker to the main worker's
+  // SkillRpc class — see apps/main/src/index.ts. Cloud agents call
+  // `env.SKILL_RPC.skillSearch({tenantId, q})` from the search_skill tool
+  // so the ClawHub registry call happens in main; the agent's DO never
+  // holds a platform API key or ClawHub credential (agent self-install SDS
+  // §2.1 — same "credentials only in main" property as MAIN_MCP above).
+  // Optional: absent on the main worker itself (it's the target) and on
+  // Node self-host, where the search_skill tool is not registered at all
+  // rather than silently faking results (SDS §2.7).
+  SKILL_RPC?: {
+    skillSearch(opts: {
+      tenantId: string;
+      q?: string;
+    }): Promise<
+      | { status: 200; results: Array<Record<string, unknown>> }
+      | { status: number; error: string }
+    >;
+  };
   // Public URL of the integrations gateway (used to build redirect URLs to
   // OAuth callbacks etc. when the gateway is on a different host).
   INTEGRATIONS_PUBLIC_URL?: string;

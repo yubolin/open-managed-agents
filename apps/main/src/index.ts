@@ -31,6 +31,7 @@ import {
   fetchVaultCredentials,
 } from "./lib/cf-session-lifecycle";
 import { validateAgentLimits } from "./lib/limits";
+import { searchClawHubSkills, type ClawHubSkill } from "./lib/clawhub";
 import { listMemberships, hasMembership } from "./auth-config";
 import environmentsRoutes from "./routes/environments";
 import oauthRoutes from "./routes/oauth";
@@ -925,5 +926,40 @@ export class McpProxyRpc extends WorkerEntrypoint<Env> {
       headers: respHeaders,
       body: await res.arrayBuffer(),
     };
+  }
+}
+
+/**
+ * Service-binding entrypoint for agent-side skill self-service (SDS
+ * agent-self-install §2.1). The agent worker's SessionDO calls
+ * `env.SKILL_RPC.skillSearch({tenantId, q})` from the search_skill tool;
+ * the ClawHub registry call happens here in main where all outbound
+ * platform calls live. Same auth model as McpProxyRpc above: the wrangler
+ * services[].entrypoint declaration is the authentication primitive —
+ * workers without an explicit "SkillRpc" entrypoint cannot reach this
+ * class, no shared secret needed. tenantId comes from the DO's session
+ * context and is trusted as in-process caller identity.
+ *
+ * Currently read-only (F2: search_skill). Mutating operations
+ * (install_skill / attach_skill with confirmation_token + supply-chain
+ * whitelist + sha256 checks, SDS §2.2-2.4) will be added as methods here
+ * so the agent never holds a platform API key for those either.
+ */
+export class SkillRpc extends WorkerEntrypoint<Env> {
+  async skillSearch(opts: {
+    tenantId: string;
+    q?: string;
+  }): Promise<
+    | { status: 200; results: ClawHubSkill[] }
+    | { status: number; error: string }
+  > {
+    try {
+      return { status: 200, results: await searchClawHubSkills(opts.q || "") };
+    } catch (err) {
+      return {
+        status: 502,
+        error: err instanceof Error ? err.message : "ClawHub search failed",
+      };
+    }
   }
 }

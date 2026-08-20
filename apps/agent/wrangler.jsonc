@@ -65,7 +65,11 @@
   //   transport adapter.
   "services": [
     { "binding": "INTEGRATIONS", "service": "managed-agents-integrations" },
-    { "binding": "MAIN_MCP", "service": "managed-agents", "entrypoint": "McpProxyRpc" }
+    { "binding": "MAIN_MCP", "service": "managed-agents", "entrypoint": "McpProxyRpc" },
+    // Skill self-service RPC (agent self-install SDS §2.1): search_skill
+    // tool → env.SKILL_RPC.skillSearch() → main worker's SkillRpc class.
+    // Binding = auth primitive, same model as MAIN_MCP.
+    { "binding": "SKILL_RPC", "service": "managed-agents", "entrypoint": "SkillRpc" }
   ],
 
   // Workers AI for generating embeddings
@@ -148,7 +152,11 @@
       ],
       "services": [
         { "binding": "INTEGRATIONS", "service": "managed-agents-integrations" },
-        { "binding": "MAIN_MCP", "service": "managed-agents", "entrypoint": "McpProxyRpc" }
+        { "binding": "MAIN_MCP", "service": "managed-agents", "entrypoint": "McpProxyRpc" },
+    // Skill self-service RPC (agent self-install SDS §2.1): search_skill
+    // tool → env.SKILL_RPC.skillSearch() → main worker's SkillRpc class.
+    // Binding = auth primitive, same model as MAIN_MCP.
+    { "binding": "SKILL_RPC", "service": "managed-agents", "entrypoint": "SkillRpc" }
       ],
       "ai": { "binding": "AI" },
       "vars": {
@@ -182,7 +190,8 @@
       ],
       "services": [
         { "binding": "INTEGRATIONS", "service": "managed-agents-integrations-staging" },
-        { "binding": "MAIN_MCP", "service": "managed-agents-staging", "entrypoint": "McpProxyRpc" }
+        { "binding": "MAIN_MCP", "service": "managed-agents-staging", "entrypoint": "McpProxyRpc" },
+        { "binding": "SKILL_RPC", "service": "managed-agents-staging", "entrypoint": "SkillRpc" }
       ],
       // Cross-script DO binding to staging RuntimeRoom (lives in
       // managed-agents-staging). Same shape as prod above.
