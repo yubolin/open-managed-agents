@@ -26,3 +26,16 @@ export class OpenMAError extends Error {
     this.url = url;
   }
 }
+
+/**
+ * Runtime capability gap discriminator (SDS agent-self-install §2.7 /
+ * runtime-capabilities.md §4). main-node answers not-yet-implemented
+ * APIs with 501 {error, runtime:"node"}; a 501 means "this runtime
+ * can't do it" and must surface as such — never as an empty result.
+ * 404 ("resource missing") is a different state and stays excluded.
+ */
+export function isOpenMANotImplemented(
+  e: unknown,
+): e is OpenMAError & { status: 501 } {
+  return e instanceof OpenMAError && e.status === 501;
+}

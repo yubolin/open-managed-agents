@@ -5,7 +5,7 @@ import { SessionsResource } from "./resources/sessions.js";
 import { MemoryStoresResource } from "./resources/memory-stores.js";
 import { DreamsResource } from "./resources/dreams.js";
 
-export { OpenMAError } from "./errors.js";
+export { OpenMAError, isOpenMANotImplemented } from "./errors.js";
 export { parseSSE } from "./sse.js";
 export type { ClientOptions } from "./client.js";
 export type * from "./types.js";

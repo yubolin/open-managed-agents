@@ -2,6 +2,8 @@ import { useMemo, useRef, useState } from "react";
 import { TrashIcon } from "lucide-react";
 import { useApi } from "../lib/api";
 import { useApiQuery } from "../lib/useApiQuery";
+import { isNotImplementedError } from "../lib/not-implemented";
+import { NotImplementedNotice } from "../components/NotImplementedNotice";
 import { Modal } from "../components/Modal";
 import { Button } from "@/components/ui/button";
 import { PopoverContent } from "@/components/ui/popover";
@@ -90,6 +92,7 @@ export function SkillsList() {
   const {
     data: skillsRes,
     isLoading: loading,
+    error: skillsError,
     refetch: refetchSkills,
   } = useApiQuery<{ data: Skill[] }>("/v1/skills", skillsParams);
   const skills = skillsRes?.data ?? [];
@@ -417,6 +420,18 @@ export function SkillsList() {
   };
 
   /* ---- render ---- */
+
+  // Node runtimes answer /v1/skills with 501 — render an explicit notice
+  // instead of an empty list that reads as "no skills" (F8, §2.7). Placed
+  // after every hook: the error arrives asynchronously, so an earlier
+  // return would change the hook count between renders.
+  if (isNotImplementedError(skillsError)) {
+    return (
+      <div className="p-6">
+        <NotImplementedNotice detail={skillsError.message} />
+      </div>
+    );
+  }
 
   return (
     <DataTable<Skill>

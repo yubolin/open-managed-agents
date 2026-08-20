@@ -2,6 +2,8 @@ import { useMemo, useState } from "react";
 import { XCircleIcon } from "lucide-react";
 import { useApi } from "../lib/api";
 import { useApiQuery } from "../lib/useApiQuery";
+import { isNotImplementedError } from "../lib/not-implemented";
+import { NotImplementedNotice } from "../components/NotImplementedNotice";
 import { Button } from "@/components/ui/button";
 import { PopoverContent } from "@/components/ui/popover";
 import { Modal } from "../components/Modal";
@@ -60,11 +62,16 @@ export function RuntimesList() {
   const {
     data: runtimesRes,
     isLoading: loading,
+    error: runtimesError,
     refetch,
   } = useApiQuery<{ runtimes: Runtime[] }>(
     "/v1/runtimes",
     undefined,
-    { refetchInterval: 15_000 },
+    {
+      // Stop the 15s heartbeat once the query errors — a 501 runtime
+      // would otherwise re-toast "Not Implemented" every interval.
+      refetchInterval: (query) => (query.state.error ? false : 15_000),
+    },
   );
   const runtimes = runtimesRes?.runtimes ?? [];
 
@@ -244,6 +251,18 @@ export function RuntimesList() {
       </PopoverContent>
     </FilterChip>
   );
+
+  // Node runtimes answer /v1/runtimes with 501 — render an explicit notice
+  // instead of an empty list that reads as "nothing connected" (F8, §2.7).
+  // Placed after every hook: the error arrives asynchronously, so an
+  // earlier return would change the hook count between renders.
+  if (isNotImplementedError(runtimesError)) {
+    return (
+      <div className="p-6">
+        <NotImplementedNotice detail={runtimesError.message} />
+      </div>
+    );
+  }
 
   return (
     <DataTable<Runtime>
