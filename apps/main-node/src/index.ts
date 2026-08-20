@@ -1029,8 +1029,17 @@ v1.get("/stats", async (c) => {
 });
 
 // Stubs for routes the console hits but main-node doesn't yet implement.
-v1.get("/runtimes", (c) => c.json({ data: [] }));
-v1.get("/skills", (c) => c.json({ data: [] }));
+// Return 501 with an explicit `runtime: "node"` marker so the Console / SDK
+// can distinguish "not implemented on this runtime" from "success with no
+// data". See docs/skill-onboarding/runtime-capabilities.md §3.
+const nodeNotImplemented = (c: { json: (body: unknown, status: number) => Response }) =>
+  c.json(
+    { error: "Not Implemented in this runtime", runtime: "node" },
+    501,
+  );
+
+v1.get("/runtimes", nodeNotImplemented);
+v1.get("/skills", nodeNotImplemented);
 v1.route("/environments", buildEnvironmentRoutes({
   environments: environmentsService,
   sessions: sessionsService,
@@ -1087,9 +1096,9 @@ v1.post("/models/list", async (c) => {
     );
   }
 });
-v1.get("/integrations/github/credentials", (c) => c.json({ data: [] }));
-v1.get("/integrations/linear/credentials", (c) => c.json({ data: [] }));
-v1.get("/integrations/slack/credentials", (c) => c.json({ data: [] }));
+v1.get("/integrations/github/credentials", nodeNotImplemented);
+v1.get("/integrations/linear/credentials", nodeNotImplemented);
+v1.get("/integrations/slack/credentials", nodeNotImplemented);
 
 // Real integration CRUD + lookup (linear/github/slack publications,
 // installations, dispatch rules). Active only when PLATFORM_ROOT_SECRET is
