@@ -231,6 +231,29 @@ export interface Env {
       | { status: 201; skill: Record<string, unknown> }
       | { status: number; error: string }
     >;
+    /** attach_skill backend (SDS §2.4-2.6, F4) — re-checks the caller's
+     *  sha256 against the install-time pin (mismatch → 409), binds the
+     *  skill onto the agent with optimistic concurrency (retry-once),
+     *  and always reports new_session_required: sessions freeze the
+     *  agent snapshot, attach never hot-reloads. */
+    skillAttach(opts: {
+      tenantId: string;
+      agentId: string;
+      skillId: string;
+      version: string;
+      hash: string;
+    }): Promise<
+      | {
+          status: 200;
+          attached: {
+            new_session_required: true;
+            skill_id: string;
+            version: string;
+            agent_version: number;
+          };
+        }
+      | { status: number; error: string }
+    >;
   };
   /** SDS agent-self-install §2.4 supply-chain gate. "1"/"true" = only
    *  ClawHub verified-tier (or official) packages may install. Default

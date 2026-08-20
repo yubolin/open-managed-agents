@@ -27,7 +27,7 @@ import type { BrowserHarness, BrowserBillingHook } from "@open-managed-agents/br
  *  hands buildTools a skillRpc channel (CF service binding). On Node
  *  self-host the name is recognised but never registered — no silent
  *  fake (agent self-install SDS §2.7). */
-export const DEFAULT_TOOLS = ["bash", "read", "write", "edit", "glob", "grep", "web_fetch", "web_search", "search_skill", "install_skill", "schedule", "cancel_schedule", "list_schedules"];
+export const DEFAULT_TOOLS = ["bash", "read", "write", "edit", "glob", "grep", "web_fetch", "web_search", "search_skill", "install_skill", "attach_skill", "schedule", "cancel_schedule", "list_schedules"];
 
 /** Tools recognised but NOT registered by default — agents must opt in
  *  via tools config (`{ name: "browser", enabled: true }`).
@@ -407,6 +407,27 @@ export async function buildTools(
         version: string;
       }): Promise<
         | { status: 201; skill: Record<string, unknown> }
+        | { status: number; error: string }
+      >;
+      /** attach_skill backend (SDS §2.4-2.6, F4) — hash re-check,
+       *  optimistic concurrency with retry-once platform-side, always
+       *  new_session_required in the success payload. */
+      skillAttach(opts: {
+        tenantId: string;
+        agentId: string;
+        skillId: string;
+        version: string;
+        hash: string;
+      }): Promise<
+        | {
+            status: 200;
+            attached: {
+              new_session_required: true;
+              skill_id: string;
+              version: string;
+              agent_version: number;
+            };
+          }
         | { status: number; error: string }
       >;
     };
@@ -1082,6 +1103,53 @@ export async function buildTools(
           return `install_skill failed (${res.status}): ${res.error}`;
         }
         return res.skill;
+      }),
+    });
+  }
+
+  // --- Skill attach (agent self-install SDS §2.1/§2.4-2.6, F4) ---
+  // Mutating: default always_ask (DEFAULT_ASK_TOOLS). Binds an INSTALLED
+  // skill onto an agent. The sha256 hash from install_skill must be passed
+  // back — the platform re-checks it against the install-time pin (mismatch
+  // → 409). Optimistic concurrency + retry-once live platform-side; the
+  // agent row version is the etag. Success always returns
+  // new_session_required: true — sessions freeze the agent snapshot at
+  // creation, so the CURRENT session never sees the skill. After a
+  // successful attach, tell the user to start a new session.
+  if (env?.skillRpc && enabled.has("attach_skill")) {
+    tools.attach_skill = tool({
+      description:
+        "Attach an installed skill to an agent so NEW sessions gain its capabilities. " +
+        "Requires the sha256 hash returned by install_skill (integrity re-check). " +
+        "Returns new_session_required: true — the current session is NOT hot-reloaded " +
+        "(its agent snapshot is frozen); the skill only takes effect in sessions created " +
+        "AFTER this call. Always tell the user a new session is needed.",
+      inputSchema: z.object({
+        agent_id: z.string().min(1).describe("Target agent id (must belong to the same tenant)"),
+        skill_id: z.string().min(1).describe("Skill id from install_skill"),
+        version: z
+          .string()
+          .min(1)
+          .refine((v) => v !== "latest", "version 'latest' is forbidden; pass an explicit version pin")
+          .describe("Explicit skill version (never 'latest')"),
+        hash: z
+          .string()
+          .regex(/^[0-9a-f]{64}$/, "hash must be the sha256 hex returned by install_skill")
+          .describe("sha256 hash from install_skill — re-checked platform-side"),
+      }),
+      execute: safe(async ({ agent_id, skill_id, version, hash }) => {
+        const res = await env.skillRpc!.skillAttach({
+          tenantId: env.tenantId || "",
+          agentId: agent_id,
+          skillId: skill_id,
+          version,
+          hash,
+        });
+        // `in`-narrowing: error variant's status is `number`, admits 200.
+        if (!("attached" in res)) {
+          return `attach_skill failed (${res.status}): ${res.error}`;
+        }
+        return res.attached;
       }),
     });
   }

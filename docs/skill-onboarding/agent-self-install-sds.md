@@ -135,7 +135,7 @@ agent 引导用户："绑定到当前 Agent 后需要新 Session 才生效"
 | **F1** ✅ | 强制 version 必填 + 禁 latest | 无 | 9e01541（已 commit + push）|
 | **F2** ✅ | `search_skill` 工具 schema（only CF 实现）| F1 | 单测 6/6 + 回归（apps/main 17/17、schedule 16/16、clawhub 4/4）；E2E smoke 归 F9（984ed88）|
 | **F3** ✅ | `install_skill` 工具 + 供应链门（env 门控 `OMA_SKILL_REQUIRE_VERIFIED`，owner 2026-08-20 默认关）+ sha256 写入 skillver manifest | F1, F2 | lib 单测 8/8 + 路由 4/4 + agent 工具 6/6；lib/route/SkillRpc 三方同源（lib/clawhub.ts）|
-| **F4** ⏳ | `attach_skill` 工具 + optimistic concurrency + always_ask + `new_session_required` | F1, F3 | 集成测 + smoke §6.2-6.4 |
+| **F4** ✅ | `attach_skill` 工具 + optimistic concurrency（复用 agent 行 `version` 作 etag，retry-once）+ always_ask + `new_session_required` + hash 复验（不一致→409） | F1, F3 | lib 单测 12/12 + 工具 6/6；smoke §6.2-6.4 归 F9 |
 | **F5** ⏳ | 客户端 confirmation_token 流程 | F3, F4 | E2E |
 | **F6** ⏳ | Agent etag 协议 | F4 | 单测 |
 | **F7** ⏳ | Node `attach_skill` custom 类型 → 501 | F4 | 验收门 §5.3 |

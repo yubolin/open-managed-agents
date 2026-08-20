@@ -41,6 +41,15 @@ import {
   type ClawHubSkill,
   type InstalledSkill,
 } from "./lib/clawhub";
+import {
+  attachSkillToAgent,
+  AttachValidationError,
+  SkillNotFoundError,
+  HashMismatchError,
+  AgentNotFoundError,
+  AttachConflictError,
+  type AttachedSkill,
+} from "./lib/skill-attach";
 import { listMemberships, hasMembership } from "./auth-config";
 import environmentsRoutes from "./routes/environments";
 import oauthRoutes from "./routes/oauth";
@@ -1008,6 +1017,49 @@ export class SkillRpc extends WorkerEntrypoint<Env> {
       if (err instanceof InstallSourceError) return { status: 403, error: err.message };
       if (err instanceof InstallNotFoundError) return { status: 404, error: err.message };
       return { status: 502, error: err instanceof Error ? err.message : "install failed" };
+    }
+  }
+
+  /**
+   * attach_skill tool backend (SDS §2.4-2.6, F4). Re-checks the caller's
+   * sha256 against the hash pinned at install (mismatch → 409), then binds
+   * {skill_id, type:"custom", version} onto the agent via optimistic
+   * concurrency (agent row `version` is the etag; retry-once inside, second
+   * conflict → 409 with the latest version). Success always reports
+   * new_session_required — sessions freeze the agent snapshot, so attach
+   * never hot-reloads a running session.
+   * Status mapping: 400 validation / 404 skill-or-agent missing /
+   * 409 hash-mismatch or version conflict / 500 mapping bug.
+   */
+  async skillAttach(opts: {
+    tenantId: string;
+    agentId: string;
+    skillId: string;
+    version: string;
+    hash: string;
+  }): Promise<
+    | { status: 200; attached: AttachedSkill }
+    | { status: number; error: string }
+  > {
+    try {
+      const services = await getCfServicesForTenant(this.env, opts.tenantId);
+      const attached = await attachSkillToAgent({
+        tenantId: opts.tenantId,
+        agentId: opts.agentId,
+        skillId: opts.skillId,
+        version: opts.version,
+        hash: opts.hash,
+        kv: services.kv,
+        agents: services.agents,
+      });
+      return { status: 200, attached };
+    } catch (err) {
+      if (err instanceof AttachValidationError) return { status: 400, error: err.message };
+      if (err instanceof SkillNotFoundError) return { status: 404, error: err.message };
+      if (err instanceof AgentNotFoundError) return { status: 404, error: err.message };
+      if (err instanceof HashMismatchError) return { status: 409, error: err.message };
+      if (err instanceof AttachConflictError) return { status: 409, error: err.message };
+      return { status: 500, error: err instanceof Error ? err.message : "attach failed" };
     }
   }
 }
