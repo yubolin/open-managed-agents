@@ -4,7 +4,8 @@
 
 FROM node:22-slim AS deps
 
-RUN apt-get update \
+RUN (sed -i 's/deb.debian.org/mirrors.ustc.edu.cn/g' /etc/apt/sources.list.d/debian.sources 2>/dev/null || sed -i 's/deb.debian.org/mirrors.ustc.edu.cn/g' /etc/apt/sources.list || true) \
+  && apt-get update \
   && apt-get install -y --no-install-recommends python3 build-essential \
   && rm -rf /var/lib/apt/lists/*
 
@@ -22,6 +23,7 @@ COPY apps/docs/package.json apps/docs/
 COPY packages packages
 
 RUN corepack enable \
+  && pnpm config set registry https://registry.npmmirror.com \
   && pnpm install --frozen-lockfile
 
 COPY apps/cmdb-mcp apps/cmdb-mcp
