@@ -910,6 +910,10 @@ v1.use("*", authMw);
 // card; an empty card set keeps the legacy ANTHROPIC_API_KEY fallback usable.
 v1.route("/agents", buildAgentRoutes({
   services,
+  // Node has no SKILL_RPC/KV manifest lane — refuse custom-skill writes
+  // with an explicit 501 instead of a row the runtime can never resolve
+  // (SDS agent-self-install §2.7 / F7).
+  allowCustomSkills: false,
   validateModel: async (tenantId, model) => {
     const cards = await modelCardsService.list({ tenantId });
     const active = cards.filter((card) => card.archived_at === null);

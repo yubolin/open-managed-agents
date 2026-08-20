@@ -150,6 +150,18 @@ export interface AgentRoutesDeps {
     tenantId: string,
     agentId: string,
   ) => Promise<boolean>;
+  /** Custom-skill capability gate (SDS agent-self-install §2.7). CF
+   *  resolves skills[].type === "custom" via SKILL_RPC/KV manifests and
+   *  leaves this undefined (allowed). Node passes false: it has no
+   *  manifest lane, so writes carrying a custom skill get an explicit
+   *  501 instead of a row the runtime can never serve. */
+  allowCustomSkills?: boolean;
+}
+
+function hasCustomSkill(skills: AgentConfig["skills"] | null | undefined): boolean {
+  return (
+    Array.isArray(skills) && skills.some((s) => (s as { type?: string })?.type === "custom")
+  );
 }
 
 export function buildAgentRoutes(deps: AgentRoutesDeps) {
@@ -193,6 +205,13 @@ export function buildAgentRoutes(deps: AgentRoutesDeps) {
     if (!body.name) return c.json({ error: "name is required" }, 400);
     if (!body.runtime_binding && !body.model) {
       return c.json({ error: "model is required for cloud agents" }, 400);
+    }
+
+    if (deps.allowCustomSkills === false && hasCustomSkill(body.skills)) {
+      return c.json(
+        { error: "custom skills are not implemented in this runtime", runtime: "node" },
+        501,
+      );
     }
 
     if (deps.validateAgentLimits) {
@@ -407,6 +426,15 @@ export function buildAgentRoutes(deps: AgentRoutesDeps) {
             "version is required for updates (optimistic concurrency); re-read the agent and retry",
         },
         428,
+      );
+    }
+
+    // attach_skill's write lane on runtimes without a skill manifest
+    // store (SDS §2.7): reject the custom-skill upsert explicitly.
+    if (deps.allowCustomSkills === false && hasCustomSkill(body.skills)) {
+      return c.json(
+        { error: "custom skills are not implemented in this runtime", runtime: "node" },
+        501,
       );
     }
 
