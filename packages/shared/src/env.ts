@@ -227,6 +227,9 @@ export interface Env {
       tenantId: string;
       slug: string;
       version: string;
+      /** One-time 60s-TTL token from the Console approval modal (SDS §2.2).
+       *  Admin tenants (OMA_SKILL_ADMIN_ALLOWLIST) may omit it. */
+      confirmationToken?: string;
     }): Promise<
       | { status: 201; skill: Record<string, unknown> }
       | { status: number; error: string }
@@ -242,6 +245,9 @@ export interface Env {
       skillId: string;
       version: string;
       hash: string;
+      /** One-time 60s-TTL token from the Console approval modal (SDS §2.2).
+       *  Admin tenants (OMA_SKILL_ADMIN_ALLOWLIST) may omit it. */
+      confirmationToken?: string;
     }): Promise<
       | {
           status: 200;
@@ -264,6 +270,10 @@ export interface Env {
    *  lane ships with URL-based install sources; current install path is
    *  ClawHub-only. */
   OMA_SKILL_WHITELIST_URLS?: string;
+  /** Comma-separated tenant ids of operational accounts whose skill-tool
+   *  calls skip the confirmation_token requirement (SDS §2.2 admin
+   *  bypass). Default unset — every tenant confirms. */
+  OMA_SKILL_ADMIN_ALLOWLIST?: string;
   // Public URL of the integrations gateway (used to build redirect URLs to
   // OAuth callbacks etc. when the gateway is on a different host).
   INTEGRATIONS_PUBLIC_URL?: string;

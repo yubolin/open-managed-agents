@@ -136,7 +136,7 @@ agent 引导用户："绑定到当前 Agent 后需要新 Session 才生效"
 | **F2** ✅ | `search_skill` 工具 schema（only CF 实现）| F1 | 单测 6/6 + 回归（apps/main 17/17、schedule 16/16、clawhub 4/4）；E2E smoke 归 F9（984ed88）|
 | **F3** ✅ | `install_skill` 工具 + 供应链门（env 门控 `OMA_SKILL_REQUIRE_VERIFIED`，owner 2026-08-20 默认关）+ sha256 写入 skillver manifest | F1, F2 | lib 单测 8/8 + 路由 4/4 + agent 工具 6/6；lib/route/SkillRpc 三方同源（lib/clawhub.ts）|
 | **F4** ✅ | `attach_skill` 工具 + optimistic concurrency（复用 agent 行 `version` 作 etag，retry-once）+ always_ask + `new_session_required` + hash 复验（不一致→409） | F1, F3 | lib 单测 12/12 + 工具 6/6；smoke §6.2-6.4 归 F9 |
-| **F5** ⏳ | 客户端 confirmation_token 流程 | F3, F4 | E2E |
+| **F5** ✅ | confirmation_token 全链路：lib（64-hex 单次 + TTL 60s + purpose 绑定 + admin bypass）→ mint 路由 `POST /v1/skills/confirmation` → SkillRpc 双入口 guard（403）→ `user.tool_confirmation.confirmation_token` 事件穿透 → Console SkillApprovalCard（Approve 时铸造）| F3, F4 | lib 单测 12/12 + token 穿透 7/7 + 回归 49/49；E2E 归 F9 |
 | **F6** ⏳ | Agent etag 协议 | F4 | 单测 |
 | **F7** ⏳ | Node `attach_skill` custom 类型 → 501 | F4 | 验收门 §5.3 |
 | **F8** ⏳ | SDK Client 区分 501 / 200-empty | F1 | 单测 + 视觉验证 |

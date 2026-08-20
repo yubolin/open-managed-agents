@@ -15,6 +15,7 @@ import {
   TrajectoryViewerModal,
 } from "./session-detail/Trajectory";
 import { TimelineView } from "../components/timeline/TimelineView";
+import { SkillApprovalCard } from "../components/SkillApprovalCard";
 import type { Event } from "../lib/events";
 import {
   projectCanonicalChatTurns,
@@ -1080,6 +1081,15 @@ export function SessionDetail() {
             </ConversationContent>
             <ConversationScrollButton />
           </Conversation>
+
+          {/* Pending skill-tool approvals (agent self-install SDS §2.2, F5).
+              Mutating skill tools are always_ask — the card mints the one-time
+              confirmation_token on Approve and posts user.tool_confirmation. */}
+          <SkillApprovalCard
+            sessionId={id ?? ""}
+            events={events as unknown as import("../lib/events").Event[]}
+            api={api as unknown as (path: string, init?: RequestInit) => Promise<unknown>}
+          />
 
           {/* Prompt input. ai-elements <PromptInput> wraps a <form> with
               an InputGroup-based textarea + attachment lifecycle; we

@@ -5,6 +5,7 @@ import { logWarn } from "@open-managed-agents/shared";
 import { unzipSync } from "fflate";
 import { checkUploadFreq, checkUploadSize } from "../quotas";
 import { kvKey, kvPrefix, kvListAll } from "../kv-helpers";
+import { mintSkillConfirmation } from "../lib/skill-confirmation";
 import type { Services } from "@open-managed-agents/services";
 import type { BlobStore } from "@open-managed-agents/blob-store";
 
@@ -910,6 +911,26 @@ app.delete("/:id/versions/:version", async (c) => {
   await c.var.services.kv.delete(key);
 
   return c.json({ type: "skill_version_deleted", id, version });
+});
+
+// POST /confirmation — mint a confirmation_token (SDS agent-self-install
+// §2.2, slice F5). Called by the Console approval modal: the authenticated
+// user clicking Approve on a pending install_skill / attach_skill call is
+// the human attestation; this endpoint turns that click into a single-use,
+// 60s-TTL, purpose-bound token the approved tool call must carry. The
+// agent-side tool forwards it to SkillRpc, which consumes it exactly once.
+app.post("/confirmation", async (c) => {
+  const t = c.get("tenant_id");
+  const body = await c.req.json<{ purpose?: string }>().catch(() => ({}) as { purpose?: string });
+  if (body.purpose !== "install" && body.purpose !== "attach") {
+    return c.json({ error: "purpose must be 'install' or 'attach'" }, 400);
+  }
+  const res = await mintSkillConfirmation({
+    kv: c.var.services.kv,
+    tenantId: t,
+    purpose: body.purpose,
+  });
+  return c.json({ confirmation_token: res.token, expires_in: res.expires_in }, 201);
 });
 
 export default app;

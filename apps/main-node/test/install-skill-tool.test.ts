@@ -77,4 +77,33 @@ describe("install_skill tool (F3)", () => {
     };
     expect(getToolPermission(cfg as never, "install_skill")).toBe("always_allow");
   });
+
+  it("execute passes env.skillConfirmToken through to the RPC (F5 SDS §2.2)", async () => {
+    const calls: Array<Record<string, unknown>> = [];
+    const cfg = {
+      ...mockAgentConfig,
+      tools: [
+        {
+          type: "agent_toolset_20260401",
+          configs: [{ name: "install_skill", enabled: true, permission_policy: { type: "always_allow" } }],
+        },
+      ],
+    };
+    const tools = await buildTools(cfg as never, null as never, {
+      skillRpc: {
+        ...makeRpc(),
+        skillInstall: async (o: Record<string, unknown>) => {
+          calls.push(o);
+          return { status: 201 as const, skill: { id: "skill_x" } };
+        },
+      },
+      skillConfirmToken: "tok-123",
+    });
+    const t = tools["install_skill"] as { execute: (a: unknown, o?: unknown) => Promise<unknown> };
+    await t.execute(
+      { slug: "deployment-kit", version: "1.0.3" },
+      { toolCallId: "tc", messages: [], abortSignal: undefined } as never,
+    );
+    expect(calls[0]).toMatchObject({ confirmationToken: "tok-123" });
+  });
 });

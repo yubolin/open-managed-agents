@@ -258,6 +258,12 @@ export interface UserToolConfirmationEvent extends EventBase {
   tool_use_id: string;
   result: "allow" | "deny";
   deny_message?: string;
+  /** One-time 60s-TTL token minted by the Console approval modal via
+   *  POST /v1/skills/confirmation (agent self-install SDS §2.2, F5).
+   *  Present when result is "allow" and the approved tool is a mutating
+   *  skill tool; the session threads it into the tool's execute so
+   *  SkillRpc can verify the human actually approved. */
+  confirmation_token?: string;
 }
 
 export interface UserCustomToolResultEvent extends EventBase {

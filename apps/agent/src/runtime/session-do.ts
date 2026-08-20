@@ -3651,6 +3651,10 @@ export class SessionDO extends DurableObject<Env> {
       skillRpc: this.env.SKILL_RPC,
           tenantId: this.state.tenant_id,
           sessionId: this.state.session_id,
+          // F5 (SDS §2.2): the one-time token minted by the Console approval
+          // modal rides the user.tool_confirmation event. Scoped to THIS
+          // re-execution only — the model-driven path never sees it.
+          skillConfirmToken: confirmation.confirmation_token,
           browser: this.getBrowserHarness() ?? undefined,
           auxModel: auxResolved?.model,
           auxModelInfo: auxResolved?.modelInfo,

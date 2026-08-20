@@ -387,6 +387,12 @@ export async function buildTools(
     mcpFetch?: (server: { name: string; url: string; authorization_token?: string }) => typeof fetch;
     tenantId?: string;
     sessionId?: string;
+    /** One-time confirmation token threaded from the user's approval of a
+     *  pending skill-tool call (SDS §2.2, F5). SessionDO sets it ONLY for
+     *  the confirmed re-execution (from user.tool_confirmation's
+     *  confirmation_token); the normal model-driven path leaves it unset
+     *  and the platform rejects the call with 403. */
+    skillConfirmToken?: string;
     /** Skill self-service channel (agent self-install SDS §2.1). CF wires
      *  this to the SKILL_RPC WorkerEntrypoint binding on SessionDO; the
      *  ClawHub registry call executes in the main worker so the agent
@@ -405,6 +411,7 @@ export async function buildTools(
         tenantId: string;
         slug: string;
         version: string;
+        confirmationToken?: string;
       }): Promise<
         | { status: 201; skill: Record<string, unknown> }
         | { status: number; error: string }
@@ -418,6 +425,7 @@ export async function buildTools(
         skillId: string;
         version: string;
         hash: string;
+        confirmationToken?: string;
       }): Promise<
         | {
             status: 200;
@@ -1098,7 +1106,12 @@ export async function buildTools(
           .describe("Explicit version pin (never 'latest')"),
       }),
       execute: safe(async ({ slug, version }) => {
-        const res = await env.skillRpc!.skillInstall({ tenantId: env.tenantId || "", slug, version });
+        const res = await env.skillRpc!.skillInstall({
+          tenantId: env.tenantId || "",
+          slug,
+          version,
+          confirmationToken: env.skillConfirmToken,
+        });
         if (!("skill" in res)) {
           return `install_skill failed (${res.status}): ${res.error}`;
         }
@@ -1144,6 +1157,7 @@ export async function buildTools(
           skillId: skill_id,
           version,
           hash,
+          confirmationToken: env.skillConfirmToken,
         });
         // `in`-narrowing: error variant's status is `number`, admits 200.
         if (!("attached" in res)) {

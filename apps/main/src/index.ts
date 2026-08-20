@@ -50,6 +50,10 @@ import {
   AttachConflictError,
   type AttachedSkill,
 } from "./lib/skill-attach";
+import {
+  skillConfirmationGuard,
+  ConfirmationRequiredError,
+} from "./lib/skill-confirmation";
 import { listMemberships, hasMembership } from "./auth-config";
 import environmentsRoutes from "./routes/environments";
 import oauthRoutes from "./routes/oauth";
@@ -994,6 +998,9 @@ export class SkillRpc extends WorkerEntrypoint<Env> {
     tenantId: string;
     slug: string;
     version: string;
+    /** One-time 60s-TTL token minted by the Console approval modal
+     *  (SDS §2.2). Admin tenants (OMA_SKILL_ADMIN_ALLOWLIST) omit it. */
+    confirmationToken?: string;
   }): Promise<
     | { status: 201; skill: InstalledSkill }
     | { status: number; error: string }
@@ -1003,6 +1010,13 @@ export class SkillRpc extends WorkerEntrypoint<Env> {
       return { status: 500, error: "FILES_BUCKET binding not configured" };
     }
     try {
+      await skillConfirmationGuard({
+        kv: services.kv,
+        tenantId: opts.tenantId,
+        token: opts.confirmationToken,
+        purpose: "install",
+        adminAllowlist: this.env.OMA_SKILL_ADMIN_ALLOWLIST,
+      });
       const skill = await installClawHubSkill({
         tenantId: opts.tenantId,
         slug: opts.slug,
@@ -1013,6 +1027,7 @@ export class SkillRpc extends WorkerEntrypoint<Env> {
       });
       return { status: 201, skill };
     } catch (err) {
+      if (err instanceof ConfirmationRequiredError) return { status: 403, error: err.message };
       if (err instanceof InstallValidationError) return { status: 400, error: err.message };
       if (err instanceof InstallSourceError) return { status: 403, error: err.message };
       if (err instanceof InstallNotFoundError) return { status: 404, error: err.message };
@@ -1037,12 +1052,22 @@ export class SkillRpc extends WorkerEntrypoint<Env> {
     skillId: string;
     version: string;
     hash: string;
+    /** One-time 60s-TTL token minted by the Console approval modal
+     *  (SDS §2.2). Admin tenants (OMA_SKILL_ADMIN_ALLOWLIST) omit it. */
+    confirmationToken?: string;
   }): Promise<
     | { status: 200; attached: AttachedSkill }
     | { status: number; error: string }
   > {
     try {
       const services = await getCfServicesForTenant(this.env, opts.tenantId);
+      await skillConfirmationGuard({
+        kv: services.kv,
+        tenantId: opts.tenantId,
+        token: opts.confirmationToken,
+        purpose: "attach",
+        adminAllowlist: this.env.OMA_SKILL_ADMIN_ALLOWLIST,
+      });
       const attached = await attachSkillToAgent({
         tenantId: opts.tenantId,
         agentId: opts.agentId,
@@ -1054,6 +1079,7 @@ export class SkillRpc extends WorkerEntrypoint<Env> {
       });
       return { status: 200, attached };
     } catch (err) {
+      if (err instanceof ConfirmationRequiredError) return { status: 403, error: err.message };
       if (err instanceof AttachValidationError) return { status: 400, error: err.message };
       if (err instanceof SkillNotFoundError) return { status: 404, error: err.message };
       if (err instanceof AgentNotFoundError) return { status: 404, error: err.message };
