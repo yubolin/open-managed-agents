@@ -27,7 +27,7 @@ import type { BrowserHarness, BrowserBillingHook } from "@open-managed-agents/br
  *  hands buildTools a skillRpc channel (CF service binding). On Node
  *  self-host the name is recognised but never registered — no silent
  *  fake (agent self-install SDS §2.7). */
-export const DEFAULT_TOOLS = ["bash", "read", "write", "edit", "glob", "grep", "web_fetch", "web_search", "search_skill", "schedule", "cancel_schedule", "list_schedules"];
+export const DEFAULT_TOOLS = ["bash", "read", "write", "edit", "glob", "grep", "web_fetch", "web_search", "search_skill", "install_skill", "schedule", "cancel_schedule", "list_schedules"];
 
 /** Tools recognised but NOT registered by default — agents must opt in
  *  via tools config (`{ name: "browser", enabled: true }`).
@@ -292,9 +292,17 @@ function jsonSchemaPropertyToZod(prop: Record<string, unknown>): z.ZodTypeAny {
   }
 }
 
+/** Tools whose DEFAULT permission tier is always_ask (agent self-install
+ *  SDS §2.1) — mutating skill operations. Explicit per-tool or toolset
+ *  config still overrides this fallback. */
+const DEFAULT_ASK_TOOLS = new Set(["install_skill", "attach_skill", "detach_skill", "uninstall_skill"]);
+
 /**
  * Resolve the permission policy for a given tool name from the agent config.
- * Checks per-tool config first, then falls back to default_config, then "always_allow".
+ * Checks per-tool config first, then falls back to default_config, then
+ * "always_allow" — except mutating skill tools, which default to
+ * "always_ask" (SDS §2.1) so unconfigured agents still require user
+ * confirmation before installing/uninstalling skills.
  */
 export function getToolPermission(agentConfig: AgentConfig, toolName: string): string {
   for (const t of agentConfig.tools) {
@@ -306,7 +314,7 @@ export function getToolPermission(agentConfig: AgentConfig, toolName: string): s
     // Fall back to default config
     if (ts.default_config?.permission_policy?.type) return ts.default_config.permission_policy.type;
   }
-  return "always_allow";
+  return DEFAULT_ASK_TOOLS.has(toolName) ? "always_ask" : "always_allow";
 }
 
 function getEnabledTools(tools: AgentConfig["tools"]): Set<string> {
@@ -391,6 +399,14 @@ export async function buildTools(
         q?: string;
       }): Promise<
         | { status: 200; results: Array<Record<string, unknown>> }
+        | { status: number; error: string }
+      >;
+      skillInstall(opts: {
+        tenantId: string;
+        slug: string;
+        version: string;
+      }): Promise<
+        | { status: 201; skill: Record<string, unknown> }
         | { status: number; error: string }
       >;
     };
@@ -1032,6 +1048,40 @@ export async function buildTools(
           return `ClawHub search failed (${res.status}): ${res.error}`;
         }
         return { results: res.results };
+      }),
+    });
+  }
+
+  // --- Skill install (agent self-install SDS §2.1/§2.4, F3) ---
+  // Mutating: default permission tier is always_ask (see
+  // DEFAULT_ASK_TOOLS above) — the user confirms the pending call in the
+  // Console before session-do re-executes with the intact version.
+  // Version must be an explicit pin; "latest" is rejected at the schema
+  // (F1 semantics) AND re-checked platform-side. The result carries the
+  // sha256 hash of the installed artifact — attach_skill (F4) will
+  // require the same hash to bind the skill to an agent.
+  if (env?.skillRpc && enabled.has("install_skill")) {
+    tools.install_skill = tool({
+      description:
+        "Install a skill from the ClawHub registry into the tenant's skill library. " +
+        "Version must be an explicit pin from search_skill results — 'latest' is rejected. " +
+        "Returns the installed skill (id, name, latest_version) plus its sha256 hash; " +
+        "installing does NOT bind the skill to an agent — use attach_skill afterwards " +
+        "(requires a new session to take effect).",
+      inputSchema: z.object({
+        slug: z.string().min(1).describe("ClawHub package slug (from search_skill results)"),
+        version: z
+          .string()
+          .min(1)
+          .refine((v) => v !== "latest", "version 'latest' is forbidden; pass an explicit version pin")
+          .describe("Explicit version pin (never 'latest')"),
+      }),
+      execute: safe(async ({ slug, version }) => {
+        const res = await env.skillRpc!.skillInstall({ tenantId: env.tenantId || "", slug, version });
+        if (!("skill" in res)) {
+          return `install_skill failed (${res.status}): ${res.error}`;
+        }
+        return res.skill;
       }),
     });
   }

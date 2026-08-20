@@ -220,7 +220,27 @@ export interface Env {
       | { status: 200; results: Array<Record<string, unknown>> }
       | { status: number; error: string }
     >;
+    /** install_skill backend — version pin enforced, supply-chain gate
+     *  env-driven (OMA_SKILL_REQUIRE_VERIFIED), sha256 pinned into the
+     *  skill-version manifest (agent self-install SDS §2.4). */
+    skillInstall(opts: {
+      tenantId: string;
+      slug: string;
+      version: string;
+    }): Promise<
+      | { status: 201; skill: Record<string, unknown> }
+      | { status: number; error: string }
+    >;
   };
+  /** SDS agent-self-install §2.4 supply-chain gate. "1"/"true" = only
+   *  ClawHub verified-tier (or official) packages may install. Default
+   *  off — ClawHub published 0 verified packages as of 2026-08-20, strict
+   *  enforcement would brick installs (owner decision 2026-08-20). */
+  OMA_SKILL_REQUIRE_VERIFIED?: string;
+  /** Comma-separated self-hosted skill source URLs (SDS §2.4). Enforcement
+   *  lane ships with URL-based install sources; current install path is
+   *  ClawHub-only. */
+  OMA_SKILL_WHITELIST_URLS?: string;
   // Public URL of the integrations gateway (used to build redirect URLs to
   // OAuth callbacks etc. when the gateway is on a different host).
   INTEGRATIONS_PUBLIC_URL?: string;

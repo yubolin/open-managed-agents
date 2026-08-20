@@ -31,7 +31,16 @@ import {
   fetchVaultCredentials,
 } from "./lib/cf-session-lifecycle";
 import { validateAgentLimits } from "./lib/limits";
-import { searchClawHubSkills, type ClawHubSkill } from "./lib/clawhub";
+import {
+  searchClawHubSkills,
+  installClawHubSkill,
+  parseRequireVerified,
+  InstallValidationError,
+  InstallSourceError,
+  InstallNotFoundError,
+  type ClawHubSkill,
+  type InstalledSkill,
+} from "./lib/clawhub";
 import { listMemberships, hasMembership } from "./auth-config";
 import environmentsRoutes from "./routes/environments";
 import oauthRoutes from "./routes/oauth";
@@ -960,6 +969,45 @@ export class SkillRpc extends WorkerEntrypoint<Env> {
         status: 502,
         error: err instanceof Error ? err.message : "ClawHub search failed",
       };
+    }
+  }
+
+  /**
+   * install_skill tool backend (SDS §2.1/§2.4, F3). Version pin enforced
+   * (F1 semantics), supply-chain gate env-driven (OMA_SKILL_REQUIRE_VERIFIED,
+   * default off — ClawHub has no verified-tier packages yet, owner decision
+   * 2026-08-20), sha256 of the zip artifact pinned into the skill-version
+   * manifest for attach-time re-check (F4). Status mapping mirrors the
+   * /v1/clawhub/install route: 400 validation / 403 source policy /
+   * 404 unknown slug / 500 no bucket / 502 upstream.
+   */
+  async skillInstall(opts: {
+    tenantId: string;
+    slug: string;
+    version: string;
+  }): Promise<
+    | { status: 201; skill: InstalledSkill }
+    | { status: number; error: string }
+  > {
+    const services = await getCfServicesForTenant(this.env, opts.tenantId);
+    if (!services.filesBlob) {
+      return { status: 500, error: "FILES_BUCKET binding not configured" };
+    }
+    try {
+      const skill = await installClawHubSkill({
+        tenantId: opts.tenantId,
+        slug: opts.slug,
+        version: opts.version,
+        kv: services.kv,
+        filesBlob: services.filesBlob,
+        requireVerified: parseRequireVerified(this.env.OMA_SKILL_REQUIRE_VERIFIED),
+      });
+      return { status: 201, skill };
+    } catch (err) {
+      if (err instanceof InstallValidationError) return { status: 400, error: err.message };
+      if (err instanceof InstallSourceError) return { status: 403, error: err.message };
+      if (err instanceof InstallNotFoundError) return { status: 404, error: err.message };
+      return { status: 502, error: err instanceof Error ? err.message : "install failed" };
     }
   }
 }
