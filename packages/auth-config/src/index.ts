@@ -36,6 +36,8 @@ export interface BuildBetterAuthOpts {
   /** When true, sign-up requires email verification before the user is
    *  signed in. Default: false on self-host (no SMTP path), true on CF prod. */
   requireEmailVerify?: boolean;
+  /** When true, user registration/sign-up is disabled. */
+  disableSignUp?: boolean;
   /** Cross-subdomain cookie domain (e.g. ".openma.dev"). Skip for default
    *  per-host scoping. */
   cookieDomain?: string;
@@ -76,6 +78,13 @@ export function buildBetterAuth(opts: BuildBetterAuthOpts) {
 
   const sender = opts.sender;
   const requireVerify = !!opts.requireEmailVerify;
+  const disableSignUp = Boolean(
+    opts.disableSignUp ??
+      (process.env.AUTH_DISABLE_SIGN_UP === "1" ||
+        process.env.AUTH_DISABLE_SIGN_UP === "true" ||
+        process.env.AUTH_DISABLE_SIGNUP === "1" ||
+        process.env.AUTH_DISABLE_SIGNUP === "true")
+  );
 
   const plugins: unknown[] = [];
   if (sender) {
@@ -142,6 +151,7 @@ export function buildBetterAuth(opts: BuildBetterAuthOpts) {
     emailAndPassword: {
       enabled: true,
       requireEmailVerification: requireVerify,
+      disableSignUp,
       ...(sendResetPassword ? { sendResetPassword } : {}),
     },
     ...(emailVerification ? { emailVerification } : {}),

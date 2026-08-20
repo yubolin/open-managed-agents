@@ -815,8 +815,14 @@ app.get("/health", (c) =>
   }),
 );
 
-app.get("/auth-info", (c) =>
-  c.json({
+app.get("/auth-info", (c) => {
+  const disableSignUp = Boolean(
+    process.env.AUTH_DISABLE_SIGN_UP === "1" ||
+      process.env.AUTH_DISABLE_SIGN_UP === "true" ||
+      process.env.AUTH_DISABLE_SIGNUP === "1" ||
+      process.env.AUTH_DISABLE_SIGNUP === "true"
+  );
+  return c.json({
     providers: authDisabled
       ? []
       : [
@@ -826,12 +832,24 @@ app.get("/auth-info", (c) =>
             ? ["google"]
             : []),
         ],
+    disable_sign_up: disableSignUp,
     turnstile_site_key: null,
-  }),
-);
+  });
+});
 
 if (auth) {
-  app.on(["GET", "POST"], "/auth/*", (c) => auth!.handler(c.req.raw));
+  app.on(["GET", "POST"], "/auth/*", (c) => {
+    const disableSignUp = Boolean(
+      process.env.AUTH_DISABLE_SIGN_UP === "1" ||
+        process.env.AUTH_DISABLE_SIGN_UP === "true" ||
+        process.env.AUTH_DISABLE_SIGNUP === "1" ||
+        process.env.AUTH_DISABLE_SIGNUP === "true"
+    );
+    if (disableSignUp && c.req.path.startsWith("/auth/sign-up")) {
+      return c.json({ message: "Registration is disabled on this server." }, 403);
+    }
+    return auth!.handler(c.req.raw);
+  });
 }
 
 // Auth middleware via packages/auth — same five-priority resolution as

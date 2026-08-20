@@ -46,8 +46,10 @@ export function Login() {
   const { data: authInfo } = useApiQuery<{
     providers?: string[];
     turnstile_site_key?: string | null;
+    disable_sign_up?: boolean;
   }>("/auth-info");
-  const googleEnabled = !!authInfo?.providers?.includes("google");
+  const disableSignUp = Boolean(authInfo?.disable_sign_up);
+  const googleEnabled = !disableSignUp && !!authInfo?.providers?.includes("google");
   // Whether the backend gates sign-up behind an email-OTP verification.
   // /auth-info advertises "email-otp" iff AUTH_REQUIRE_EMAIL_VERIFY=1 on
   // the server. When absent (default self-host), the sign-up flow does
@@ -96,6 +98,13 @@ export function Login() {
       nav(nextUrl, { replace: true });
     }
   }, [isAuthenticated, isLoading]);
+
+  useEffect(() => {
+    if (disableSignUp && (mode === "signup" || mode === "verify-signup")) {
+      setMode("login");
+      setError("Registration is currently disabled.");
+    }
+  }, [disableSignUp, mode]);
 
   useEffect(() => {
     if (
@@ -610,16 +619,20 @@ export function Login() {
               >
                 Sign in with email code
               </button>
-              <span className="mx-2">&middot;</span>
-              <button
-                onClick={() => {
-                  setMode("signup");
-                  setError("");
-                }}
-                className="inline-flex items-center min-h-11 sm:min-h-0 text-brand hover:underline"
-              >
-                Sign up
-              </button>
+              {!disableSignUp && (
+                <>
+                  <span className="mx-2">&middot;</span>
+                  <button
+                    onClick={() => {
+                      setMode("signup");
+                      setError("");
+                    }}
+                    className="inline-flex items-center min-h-11 sm:min-h-0 text-brand hover:underline"
+                  >
+                    Sign up
+                  </button>
+                </>
+              )}
             </>
           )}
           {mode === "signup" && (

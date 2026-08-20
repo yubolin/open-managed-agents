@@ -278,6 +278,6 @@ function int(v: unknown): number {
   return typeof v === "number" && Number.isFinite(v) ? v : 0;
 }
 
-function msToIso(ms: number): string {
-  return new Date(ms).toISOString();
+function msToIso(ms: number | string | bigint): string {
+  return new Date(Number(ms)).toISOString();
 }

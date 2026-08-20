@@ -389,8 +389,8 @@ export class SqlCredentialRepo implements CredentialRepo {
   }
 }
 
-function msToIso(ms: number): string {
-  return new Date(ms).toISOString();
+function msToIso(ms: number | string | bigint): string {
+  return new Date(Number(ms)).toISOString();
 }
 
 /**

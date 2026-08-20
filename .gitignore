@@ -11,6 +11,7 @@ dist/
 
 # pnpm
 pnpm-debug.log*
+.sync-*.sql
 
 # Build artifacts
 apps/agent/build-*
