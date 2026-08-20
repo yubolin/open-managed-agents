@@ -448,17 +448,17 @@ export function SessionsList() {
     setAuxLoading(true);
     try {
       const [a, e, v, f, m] = await Promise.all([
-        api<{ data: AgentLite[] }>("/v1/agents?limit=200&status=any"),
-        api<{ data: Array<{ id: string; name: string }> }>("/v1/environments?limit=200"),
+        api<{ data: AgentLite[] }>("/v1/agents?limit=200&status=any").catch(() => ({ data: [] })),
+        api<{ data: Array<{ id: string; name: string }> }>("/v1/environments?limit=200").catch(() => ({ data: [] })),
         api<{ data: Vault[] }>("/v1/vaults?limit=200").catch(() => ({ data: [] })),
         api<{ data: FilePick[] }>("/v1/files?limit=200").catch(() => ({ data: [] })),
         api<{ data: MemoryStorePick[] }>("/v1/memory_stores").catch(() => ({ data: [] })),
       ]);
-      setAgents(a.data);
-      setEnvs(e.data);
-      setVaults(v.data);
-      setFiles(f.data);
-      setMemoryStores(m.data);
+      setAgents(a.data || []);
+      setEnvs(e.data || []);
+      setVaults(v.data || []);
+      setFiles(f.data || []);
+      setMemoryStores(m.data || []);
     } catch { /* surfaced by the api wrapper as a toast */ }
     setAuxLoading(false);
   };
@@ -491,7 +491,10 @@ export function SessionsList() {
     setVaultCredHosts({});
     setRevealedSecrets(new Set());
     setShowCreate(true);
-  }, [reset, agents, envs]);
+    setTimeout(() => {
+      void trigger();
+    }, 0);
+  }, [reset, trigger, agents, envs]);
 
   const onSubmit = async (data: FormValues) => {
     try {
@@ -555,6 +558,7 @@ export function SessionsList() {
         body: JSON.stringify(body),
       });
       closeModal();
+      refreshSessions();
       nav(`/sessions/${session.id}`);
     } catch (err) {
       // 402 = no balance for cloud sandbox. Toast with the server's
@@ -851,7 +855,7 @@ export function SessionsList() {
             <Button variant="ghost" onClick={closeModal}>Cancel</Button>
             <Button
               onClick={handleSubmit(onSubmit)}
-              disabled={!formState.isValid || formState.isSubmitting}
+              disabled={formState.isSubmitting}
               loading={formState.isSubmitting}
             >
               Create
