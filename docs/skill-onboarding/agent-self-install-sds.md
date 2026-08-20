@@ -137,9 +137,9 @@ agent 引导用户："绑定到当前 Agent 后需要新 Session 才生效"
 | **F3** ✅ | `install_skill` 工具 + 供应链门（env 门控 `OMA_SKILL_REQUIRE_VERIFIED`，owner 2026-08-20 默认关）+ sha256 写入 skillver manifest | F1, F2 | lib 单测 8/8 + 路由 4/4 + agent 工具 6/6；lib/route/SkillRpc 三方同源（lib/clawhub.ts）|
 | **F4** ✅ | `attach_skill` 工具 + optimistic concurrency（复用 agent 行 `version` 作 etag，retry-once）+ always_ask + `new_session_required` + hash 复验（不一致→409） | F1, F3 | lib 单测 12/12 + 工具 6/6；smoke §6.2-6.4 归 F9 |
 | **F5** ✅ | confirmation_token 全链路：lib（64-hex 单次 + TTL 60s + purpose 绑定 + admin bypass）→ mint 路由 `POST /v1/skills/confirmation` → SkillRpc 双入口 guard（403）→ `user.tool_confirmation.confirmation_token` 事件穿透 → Console SkillApprovalCard（Approve 时铸造）| F3, F4 | lib 单测 12/12 + token 穿透 7/7 + 回归 49/49；E2E 归 F9 |
-| **F6** ⏳ | Agent etag 协议 | F4 | 单测 |
-| **F7** ⏳ | Node `attach_skill` custom 类型 → 501 | F4 | 验收门 §5.3 |
-| **F8** ⏳ | SDK Client 区分 501 / 200-empty | F1 | 单测 + 视觉验证 |
+| **F6** ✅ | Agent etag 协议：`PUT /v1/agents/:id` 缺 `version` → 428 Precondition Required；stale → 409（body 含最新 etag）；HTTP-lane 契约单测 3/3（retry-once 已在 F4 lib 落地）| F4 | 单测 3/3（159a4be）|
+| **F7** ✅ | Node `attach_skill` custom 类型 → 501：共享 agents 路由加 `allowCustomSkills` 能力门，Node 挂载传 false，create/update 携带 `skills[].type==="custom"` → 501 `{runtime:"node"}`；CF 不传（放行）| F4 | 单测 4/4（80d8fa4）|
+| **F8** ✅ | Client 区分 501 / 200-empty / 404：Console `isNotImplementedError` + `NotImplementedNotice`（SkillsList/RuntimesList 501 → 显式提示，不再渲染空列表；心跳轮询遇错自停）；SDK 导出 `isOpenMANotImplemented`（OpenMAError 自带 status+body）；CLI 已打印 501 原文无需改 | F1 | Console 44/44（含 7 新）+ SDK 3/3 + tsc/build 绿（5fbab7c）|
 | **F9** ⏳ | 端到端 smoke (smoke-test-sop §6) | F2-F5 | E2E pass |
 
 ---
