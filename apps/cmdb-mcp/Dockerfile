@@ -2,8 +2,11 @@
 #
 # CMDB MCP Connector — self-host standalone service.
 
-# ─── Stage 1: deps ──────────────────────────────────────────────────────────
 FROM node:22-slim AS deps
+
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends python3 build-essential \
+  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
@@ -27,7 +30,7 @@ COPY tsconfig.json ./
 # ─── Stage 2: runtime ──────────────────────────────────────────────────────
 FROM node:22-slim AS runtime
 
-RUN corepack enable
+RUN corepack enable && corepack prepare pnpm@11.0.8 --activate
 WORKDIR /app
 
 COPY --from=deps /app /app

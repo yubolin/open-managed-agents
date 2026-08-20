@@ -128,10 +128,16 @@ export function buildBetterAuth(opts: BuildBetterAuthOpts) {
       }
     : undefined;
 
+  const isSecure = Boolean(
+    opts.baseURL
+      ? opts.baseURL.startsWith("https://")
+      : (process.env.AUTH_COOKIE_SECURE === "1" || process.env.AUTH_COOKIE_SECURE === "true")
+  );
+
   return betterAuth({
     basePath: "/auth",
     secret: opts.secret,
-    baseURL: opts.baseURL,
+    baseURL: opts.baseURL ?? process.env.BETTER_AUTH_URL ?? "http://localhost:8787",
     database: opts.database as never,
     emailAndPassword: {
       enabled: true,
@@ -142,9 +148,24 @@ export function buildBetterAuth(opts: BuildBetterAuthOpts) {
     plugins: plugins as never,
     socialProviders,
     trustedOrigins: opts.baseURL ? [opts.baseURL] : ["*"],
-    ...(opts.cookieDomain
-      ? {
-          advanced: {
+    advanced: {
+      useSecureCookies: isSecure,
+      ...(!isSecure
+        ? {
+            cookies: {
+              session_token: {
+                name: "better-auth.session_token",
+                options: {
+                  secure: false,
+                  sameSite: "lax" as const,
+                  httpOnly: true,
+                },
+              },
+            },
+          }
+        : {}),
+      ...(opts.cookieDomain
+        ? {
             crossSubDomainCookies: {
               enabled: true,
               domain: opts.cookieDomain,
@@ -152,11 +173,11 @@ export function buildBetterAuth(opts: BuildBetterAuthOpts) {
             defaultCookieAttributes: {
               domain: opts.cookieDomain,
               sameSite: "lax" as const,
-              secure: true,
+              secure: isSecure,
             },
-          },
-        }
-      : {}),
+          }
+        : {}),
+    },
     user: {
       additionalFields: {
         tenantId: { type: "string", required: false },

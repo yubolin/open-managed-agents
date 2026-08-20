@@ -43,7 +43,7 @@ COPY tsconfig.json ./
 # ─── Stage 2: runtime ──────────────────────────────────────────────────────
 FROM node:22-slim AS runtime
 
-RUN corepack enable
+RUN corepack enable && corepack prepare pnpm@11.0.8 --activate
 WORKDIR /app
 
 COPY --from=deps /app /app

@@ -59,7 +59,7 @@ COPY tsconfig.json ./
 # middleware picks it up. Skip with --build-arg SKIP_CONSOLE=1 if you
 # want a smaller API-only image (e.g. for SDK-only deploys).
 ARG SKIP_CONSOLE=0
-RUN if [ "$SKIP_CONSOLE" != "1" ]; then \
+RUN if [ "$SKIP_CONSOLE" != "1" ] && [ ! -f apps/console/dist/index.html ]; then \
       pnpm --filter managed-agents-console build; \
     else \
       mkdir -p apps/console/dist; \
@@ -81,7 +81,8 @@ RUN apt-get update \
   && apt-get install -y --no-install-recommends \
        curl ca-certificates git python3 \
   && rm -rf /var/lib/apt/lists/* \
-  && corepack enable
+  && corepack enable \
+  && corepack prepare pnpm@11.0.8 --activate
 WORKDIR /app
 
 # Copy the whole monorepo from deps (includes node_modules, source, schemas

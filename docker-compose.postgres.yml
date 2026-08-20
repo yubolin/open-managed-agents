@@ -22,10 +22,13 @@ services:
     build:
       context: .
       dockerfile: apps/main-node/Dockerfile
+      args:
+        SKIP_CONSOLE: "1"
     image: openma/main-node:dev
     container_name: oma-server
     ports:
       - "${OMA_PORT:-8787}:8787"
+      - "5173:8787"
     env_file:
       - path: ./.env
         required: false
@@ -46,8 +49,10 @@ services:
       OMA_VAULT_PROXY_URL: http://oma-vault:14322
       OMA_VAULT_CA_CERT: /app/data/oma-vault-ca/ca.crt
       BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET:-}
+      BETTER_AUTH_URL: ${BETTER_AUTH_URL:-http://117.72.219.106:8787}
+      AUTH_COOKIE_SECURE: ${AUTH_COOKIE_SECURE:-0}
       AUTH_DISABLED: ${AUTH_DISABLED:-}
-      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://117.72.219.106:8787}
     volumes:
       - ./data:/app/data
     depends_on:
@@ -144,6 +149,8 @@ services:
     depends_on:
       oma-vault:
         condition: service_started
+    ports:
+      - "3910:3910"
     mem_limit: 256m
     restart: unless-stopped
     healthcheck:
