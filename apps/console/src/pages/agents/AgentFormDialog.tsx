@@ -297,17 +297,30 @@ export function AgentFormDialog({
     const payload: Record<string, unknown> = {
       name: form.name,
       model: form.model,
-      system: form.system || undefined,
-      description: form.description || undefined,
+      system: isEdit ? (form.system || null) : (form.system || undefined),
+      description: isEdit ? (form.description || null) : (form.description || undefined),
       tools,
     };
-    if (form.mcpServers.length) payload.mcp_servers = form.mcpServers;
-    if (form.skills.length) payload.skills = form.skills;
-    if (form.callableAgents.length) {
-      payload.multiagent = { type: "coordinator", agents: form.callableAgents };
-    }
-    if (form.enableGeneralSubagent) {
-      payload.enable_general_subagent = true;
+    if (isEdit) {
+      payload.mcp_servers = form.mcpServers;
+      payload.skills = form.skills;
+      payload.callable_agents = form.callableAgents;
+      payload.multiagent = form.callableAgents.length
+        ? { type: "coordinator", agents: form.callableAgents }
+        : null;
+      payload.enable_general_subagent = Boolean(form.enableGeneralSubagent);
+      if (agent?.version !== undefined) {
+        payload.version = agent.version;
+      }
+    } else {
+      if (form.mcpServers.length) payload.mcp_servers = form.mcpServers;
+      if (form.skills.length) payload.skills = form.skills;
+      if (form.callableAgents.length) {
+        payload.multiagent = { type: "coordinator", agents: form.callableAgents };
+      }
+      if (form.enableGeneralSubagent) {
+        payload.enable_general_subagent = true;
+      }
     }
     if (form.runtimeId && form.acpAgentId) {
       payload._oma = {
@@ -319,6 +332,11 @@ export function AgentFormDialog({
             ? { local_skill_blocklist: form.localSkillBlocklist }
             : {}),
         },
+      };
+    } else if (isEdit) {
+      payload._oma = {
+        harness: "default",
+        runtime_binding: null,
       };
     }
     return payload;
@@ -353,6 +371,10 @@ export function AgentFormDialog({
         payload = parsed;
       }
 
+      if (isEdit && agent?.version !== undefined && !("version" in payload)) {
+        payload.version = agent.version;
+      }
+
       const savedAgent = await api<Agent>(isEdit ? `/v1/agents/${agent.id}` : "/v1/agents", {
         method: isEdit ? "PUT" : "POST",
         body: JSON.stringify(payload),
@@ -364,7 +386,17 @@ export function AgentFormDialog({
         nav(`/agents/${savedAgent.id}`);
       }
     } catch (e: any) {
-      setCreateError(e?.message || `Failed to ${isEdit ? "update" : "create"} agent`);
+      if (
+        e?.status === 409 ||
+        e?.statusCode === 409 ||
+        (e?.message && e.message.includes("Version mismatch"))
+      ) {
+        setCreateError(
+          "Version conflict: The agent was updated by another user. Please refresh and try again.",
+        );
+      } else {
+        setCreateError(e?.message || `Failed to ${isEdit ? "update" : "create"} agent`);
+      }
     } finally {
       setIsSaving(false);
     }
@@ -432,22 +464,7 @@ export function AgentFormDialog({
 
   // Convert current form state to a config object
   const formToConfig = () => {
-    const config: Record<string, unknown> = {
-      name: form.name,
-      model: form.model,
-    };
-    if (form.system) config.system = form.system;
-    if (form.description) config.description = form.description;
-    config.tools = buildToolsField();
-    if (form.mcpServers.length) config.mcp_servers = form.mcpServers;
-    if (form.skills.length) config.skills = form.skills;
-    if (form.callableAgents.length) {
-      config.multiagent = { type: "coordinator", agents: form.callableAgents };
-    }
-    if (form.enableGeneralSubagent) {
-      config.enable_general_subagent = true;
-    }
-    return config;
+    return buildPayload();
   };
 
   // Switch between form/yaml/json modes
@@ -918,7 +935,7 @@ export function AgentFormDialog({
       <McpServerPickerModal
         open={showMcpPicker}
         onClose={() => setShowMcpPicker(false)}
-        onSelect={(entry) => {
+        onPick={(entry: { id: string; name: string; url: string }) => {
           addMcpFromRegistry(entry);
           setShowMcpPicker(false);
         }}
@@ -1074,7 +1091,7 @@ interface BasicTabProps {
   createError: string;
   inputCls: string;
   modelCards: ModelCard[];
-  runtimes: AgentFormDialogProps["runtimes"];
+  runtimes?: AgentFormDialogProps["runtimes"];
   selectedCardId: string;
 }
 
@@ -1084,7 +1101,7 @@ function BasicTab({
   createError,
   inputCls,
   modelCards,
-  runtimes,
+  runtimes = [],
   selectedCardId,
 }: BasicTabProps) {
   return (
@@ -1237,11 +1254,11 @@ function BasicTab({
 function AcpAgentPicker({
   form,
   setForm,
-  runtimes,
+  runtimes = [],
 }: {
   form: FormState;
   setForm: FormSetter;
-  runtimes: AgentFormDialogProps["runtimes"];
+  runtimes?: AgentFormDialogProps["runtimes"];
 }) {
   const detectedAgents = runtimes.find((r) => r.id === form.runtimeId)?.agents ?? [];
   // OMA promotes 4 agents as "first class" in the UI (overlay's
@@ -1490,12 +1507,12 @@ function ToolsTab({
 function SkillsTab({
   form,
   setForm,
-  customSkills,
+  customSkills = [],
   toggleAnthropicSkill,
 }: {
   form: FormState;
   setForm: FormSetter;
-  customSkills: AgentFormDialogProps["customSkills"];
+  customSkills?: AgentFormDialogProps["customSkills"];
   toggleAnthropicSkill: (id: string) => void;
 }) {
   // Hide skills that are already surfaced under Anthropic Skills above

@@ -206,7 +206,7 @@ export class CmdbClient {
     return headers;
   }
 
-  private async request<T>(
+  async request<T>(
     path: string,
     query?: Record<string, string | number | boolean | undefined | null>,
   ): Promise<T> {

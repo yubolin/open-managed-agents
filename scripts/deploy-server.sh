@@ -30,9 +30,12 @@ rsync -avz --delete -e "ssh ${SSH_OPTS}" \
   --exclude 'apps/agent/dist' \
   --exclude 'apps/integrations/dist' \
   --exclude 'apps/docs/dist' \
-  --exclude 'data/sandboxes' \
-  --exclude 'data/memory-blobs' \
-  --exclude 'data/session-outputs' \
+  --exclude '.env*' \
+  --exclude 'secrets/**' \
+  --exclude 'data/**' \
+  --exclude '.sync-*.sql' \
+  --exclude '.vscode' \
+  --exclude '.idea' \
   --exclude 'coverage' \
   --exclude '.pnpm-store' \
   "${REPO_ROOT}/" "${SERVER_USER}@${SERVER_HOST}:${TARGET_DIR}/"

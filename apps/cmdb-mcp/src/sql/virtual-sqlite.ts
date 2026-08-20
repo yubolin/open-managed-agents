@@ -12,7 +12,10 @@ try {
 }
 
 export interface SyncProvider {
-  request<T = unknown>(path: string, query?: Record<string, unknown>): Promise<T>;
+  request<T = unknown>(
+    path: string,
+    query?: Record<string, string | number | boolean | undefined | null>,
+  ): Promise<T>;
 }
 
 export class VirtualSqliteDb {
@@ -80,7 +83,7 @@ export class VirtualSqliteDb {
   async ensureSynced(provider: SyncProvider): Promise<void> {
     if (!this.db) return;
     const now = Date.now();
-    if (now - this.lastSyncedAt < this.syncTtlMs) {
+    if (this.lastSyncedAt > 0 && now - this.lastSyncedAt < this.syncTtlMs) {
       return;
     }
 
@@ -91,33 +94,84 @@ export class VirtualSqliteDb {
     this.syncingPromise = (async () => {
       const start = Date.now();
       try {
-        // 1. Sync Tenants
+        // 1. Fetch Tenants
+        let tenants: Array<{ tenant_id: string; tenant_name: string; role?: string }> = [];
         try {
-          const tenants = await provider.request<
+          const res = await provider.request<
             Array<{ tenant_id: string; tenant_name: string; role?: string }>
           >("/api/v1/auth/tenants");
-          if (Array.isArray(tenants)) {
+          if (Array.isArray(res)) {
+            tenants = res;
+          }
+        } catch (err) {
+          this.logger.warn({ err: String(err) }, "VirtualSqlite: failed to fetch tenants");
+        }
+
+        // 2. Fetch Assets (with full pagination loop)
+        const allAssets: Array<Record<string, unknown>> = [];
+        let page = 1;
+        const pageSize = 500;
+        while (true) {
+          const assetsRes = await provider.request<{
+            items?: Array<Record<string, unknown>>;
+            total?: number;
+          }>("/api/v1/assets/", { page, page_size: pageSize });
+
+          const items = assetsRes.items || [];
+          allAssets.push(...items);
+
+          if (
+            items.length < pageSize ||
+            (assetsRes.total !== undefined && allAssets.length >= assetsRes.total)
+          ) {
+            break;
+          }
+          page++;
+        }
+
+        // 3. Fetch Relations (with pagination)
+        const allRelations: Array<Record<string, unknown>> = [];
+        let relPage = 1;
+        while (true) {
+          try {
+            const relsRes = await provider.request<{
+              items?: Array<Record<string, unknown>>;
+              total?: number;
+            }>("/api/v1/relations/", { page: relPage, page_size: pageSize });
+
+            const rels = relsRes.items || [];
+            allRelations.push(...rels);
+
+            if (
+              rels.length < pageSize ||
+              (relsRes.total !== undefined && allRelations.length >= relsRes.total)
+            ) {
+              break;
+            }
+            relPage++;
+          } catch {
+            break;
+          }
+        }
+
+        // 4. Atomic transaction replace in SQLite (purges deleted records)
+        this.db.exec("BEGIN TRANSACTION;");
+        try {
+          // Replace tenants
+          this.db.exec("DELETE FROM tenants;");
+          if (tenants.length > 0) {
             const insertTenant = this.db.prepare(
-              "INSERT OR REPLACE INTO tenants (tenant_id, tenant_name, role) VALUES (?, ?, ?)",
+              "INSERT INTO tenants (tenant_id, tenant_name, role) VALUES (?, ?, ?)",
             );
             for (const t of tenants) {
               insertTenant.run(t.tenant_id, t.tenant_name || t.tenant_id, t.role || "user");
             }
           }
-        } catch (err) {
-          this.logger.warn({ err: String(err) }, "VirtualSqlite: failed to sync tenants");
-        }
 
-        // 2. Sync Assets
-        try {
-          const assetsRes = await provider.request<{
-            items?: Array<Record<string, unknown>>;
-            total?: number;
-          }>("/api/v1/assets/", { page_size: 500 });
-
-          const items = assetsRes.items || [];
+          // Replace assets
+          this.db.exec("DELETE FROM assets;");
           const insertAsset = this.db.prepare(`
-            INSERT OR REPLACE INTO assets (
+            INSERT INTO assets (
               id, tenant_id, instance_name, hostname, asset_type, entity_class,
               asset_class, vendor, status, region, cloud_account, project_code,
               cost_allocation_name, cpu_cores, memory_mb, ip, attributes, tags,
@@ -125,7 +179,7 @@ export class VirtualSqliteDb {
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           `);
 
-          for (const item of items) {
+          for (const item of allAssets) {
             const id = String(item.id || item.instance_id || "");
             const tenantId = String(item.tenant_id || "");
             const instanceName = item.instance_name ? String(item.instance_name) : undefined;
@@ -175,38 +229,43 @@ export class VirtualSqliteDb {
               item.updated_at ? String(item.updated_at) : null,
             );
           }
-        } catch (err) {
-          this.logger.warn({ err: String(err) }, "VirtualSqlite: failed to sync assets");
-        }
 
-        // 3. Sync Relations
-        try {
-          const relsRes = await provider.request<{ items?: Array<Record<string, unknown>> }>(
-            "/api/v1/relations/",
-            { page_size: 500 },
-          );
-          const rels = relsRes.items || [];
-          const insertRel = this.db.prepare(
-            "INSERT OR REPLACE INTO relations (id, source_id, target_id, relation_type, created_at) VALUES (?, ?, ?, ?, ?)",
-          );
-          for (const r of rels) {
-            insertRel.run(
-              String(r.id || `${r.source_id}->${r.target_id}`),
-              String(r.source_id || ""),
-              String(r.target_id || ""),
-              String(r.relation_type || "depends_on"),
-              r.created_at ? String(r.created_at) : null,
+          // Replace relations
+          this.db.exec("DELETE FROM relations;");
+          if (allRelations.length > 0) {
+            const insertRel = this.db.prepare(
+              "INSERT INTO relations (id, source_id, target_id, relation_type, created_at) VALUES (?, ?, ?, ?, ?)",
             );
+            for (const r of allRelations) {
+              insertRel.run(
+                String(r.id || `${r.source_id}->${r.target_id}`),
+                String(r.source_id || ""),
+                String(r.target_id || ""),
+                String(r.relation_type || "depends_on"),
+                r.created_at ? String(r.created_at) : null,
+              );
+            }
           }
-        } catch {
-          // relations optional
+
+          this.db.exec("COMMIT;");
+        } catch (dbErr) {
+          this.db.exec("ROLLBACK;");
+          throw dbErr;
         }
 
         this.lastSyncedAt = Date.now();
         this.logger.info(
-          { op: "virtual_sqlite.synced", duration_ms: Date.now() - start },
+          {
+            op: "virtual_sqlite.synced",
+            assets_count: allAssets.length,
+            relations_count: allRelations.length,
+            duration_ms: Date.now() - start,
+          },
           "Virtual in-memory SQLite synchronized from CMDB API",
         );
+      } catch (err) {
+        this.logger.error({ err: String(err) }, "VirtualSqlite: synchronization failed");
+        throw err;
       } finally {
         this.syncingPromise = undefined;
       }

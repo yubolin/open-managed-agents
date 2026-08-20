@@ -61,24 +61,16 @@ const allSql: string[] = ["BEGIN;"];
 const rawModelCards = queryJson("SELECT * FROM model_cards");
 const targetModelCards: Record<string, any>[] = [];
 for (const card of rawModelCards) {
-  // Target tenant model card
+  // Target tenant model card with original ID preserved for agent references
   targetModelCards.push({
     ...card,
-    id: `${card.id}-target`,
     tenant_id: TARGET_TENANT_ID,
-    is_default: card.is_default ?? 1,
-  });
-  // Default tenant model card (if not exists)
-  targetModelCards.push({
-    ...card,
-    id: `${card.id}-default`,
-    tenant_id: "default",
     is_default: card.is_default ?? 1,
   });
 }
 allSql.push(
   "-- Model Cards",
-  generateUpsertSql("model_cards", ["tenant_id", "model_id"], targetModelCards)
+  generateUpsertSql("model_cards", ["id"], targetModelCards)
 );
 
 // 2. environments

@@ -68,14 +68,6 @@ function otpEmailHtml(code: string, label: string): string {
 }
 
 export function buildBetterAuth(opts: BuildBetterAuthOpts) {
-  const socialProviders: Record<string, unknown> = {};
-  if (opts.googleClientId && opts.googleClientSecret) {
-    socialProviders.google = {
-      clientId: opts.googleClientId,
-      clientSecret: opts.googleClientSecret,
-    };
-  }
-
   const sender = opts.sender;
   const requireVerify = !!opts.requireEmailVerify;
   const disableSignUp = Boolean(
@@ -85,6 +77,15 @@ export function buildBetterAuth(opts: BuildBetterAuthOpts) {
         process.env.AUTH_DISABLE_SIGNUP === "1" ||
         process.env.AUTH_DISABLE_SIGNUP === "true")
   );
+
+  const socialProviders: Record<string, unknown> = {};
+  if (opts.googleClientId && opts.googleClientSecret) {
+    socialProviders.google = {
+      clientId: opts.googleClientId,
+      clientSecret: opts.googleClientSecret,
+      ...(disableSignUp ? { disableSignUp: true } : {}),
+    };
+  }
 
   const plugins: unknown[] = [];
   if (sender) {
