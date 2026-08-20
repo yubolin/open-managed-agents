@@ -5,6 +5,7 @@ export const en: Messages = {
     loading: "Loading…",
     cancel: "Cancel",
     create: "Create",
+    edit: "Edit",
     delete: "Delete",
     archive: "Archive",
     unarchive: "Unarchive",

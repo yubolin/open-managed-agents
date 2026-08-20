@@ -15,6 +15,7 @@ export interface Messages {
     loading: string;
     cancel: string;
     create: string;
+    edit: string;
     delete: string;
     archive: string;
     unarchive: string;

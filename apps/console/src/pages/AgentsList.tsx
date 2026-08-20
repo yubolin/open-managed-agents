@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router";
-import { ArchiveIcon, TrashIcon } from "lucide-react";
+import { ArchiveIcon, PencilIcon, TrashIcon } from "lucide-react";
 
 import { useApi } from "../lib/api";
 import { useInfiniteApiQuery } from "../lib/useApiQuery";
@@ -55,6 +55,7 @@ export function AgentsList() {
   const [runtimes, setRuntimes] = useState<Runtime[]>([]);
   const [, setAuxLoading] = useState(true);
   const [showCreate, setShowCreate] = useState(false);
+  const [editingAgent, setEditingAgent] = useState<Agent | null>(null);
 
   // Server-driven filter state. Each piece flows into agentsParams below
   // → useInfiniteApiQuery resets to page 1 on params change → the list
@@ -197,6 +198,11 @@ export function AgentsList() {
               label={`${t.common.actions} for ${a.name}`}
               actions={[
                 {
+                  label: t.common.edit,
+                  icon: <PencilIcon className="size-4" />,
+                  onSelect: () => setEditingAgent(a),
+                },
+                {
                   label: archived ? t.common.unarchive : t.common.archive,
                   icon: <ArchiveIcon className="size-4" />,
                   disabled: archived,
@@ -308,9 +314,16 @@ export function AgentsList() {
       columns={columns}
     >
       <AgentFormDialog
-        open={showCreate}
-        onClose={() => setShowCreate(false)}
-        onCreated={refreshAgents}
+        open={showCreate || !!editingAgent}
+        onClose={() => {
+          setShowCreate(false);
+          setEditingAgent(null);
+        }}
+        agent={editingAgent ?? undefined}
+        onCreated={() => {
+          setEditingAgent(null);
+          refreshAgents();
+        }}
         allAgents={allAgents}
         customSkills={customSkills}
         modelCards={modelCards}

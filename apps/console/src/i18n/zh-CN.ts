@@ -5,6 +5,7 @@ export const zhCN: Messages = {
     loading: "加载中…",
     cancel: "取消",
     create: "创建",
+    edit: "编辑",
     delete: "删除",
     archive: "归档",
     unarchive: "取消归档",
