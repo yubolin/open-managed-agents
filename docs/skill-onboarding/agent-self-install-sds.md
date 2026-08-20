@@ -133,7 +133,7 @@ agent 引导用户："绑定到当前 Agent 后需要新 Session 才生效"
 | 切片 | 范围 | 依赖 | 验收 |
 |------|------|------|------|
 | **F1** ✅ | 强制 version 必填 + 禁 latest | 无 | 9e01541（已 commit + push）|
-| **F2** ⏳ | `search_skill` 工具 schema（only CF 实现）| F1 | 单测 + E2E smoke §6.1 |
+| **F2** ✅ | `search_skill` 工具 schema（only CF 实现）| F1 | 单测 6/6 + 回归（apps/main 17/17、schedule 16/16、clawhub 4/4）；E2E smoke 归 F9（984ed88）|
 | **F3** ⏳ | `install_skill` 工具 + 白名单 + sha256 写 | F1, F2 | 单测 + 集成测 |
 | **F4** ⏳ | `attach_skill` 工具 + optimistic concurrency + always_ask + `new_session_required` | F1, F3 | 集成测 + smoke §6.2-6.4 |
 | **F5** ⏳ | 客户端 confirmation_token 流程 | F3, F4 | E2E |
