@@ -978,6 +978,52 @@ export function AgentFormDialog({
   );
 }
 
+function computeEffectiveAgent(agent: Agent, payload: Record<string, unknown>): Agent {
+  const effective: any = { ...agent };
+
+  if (payload.name !== undefined) effective.name = payload.name;
+  if (payload.model !== undefined) effective.model = payload.model;
+  if (payload.system !== undefined) effective.system = payload.system === null ? "" : String(payload.system);
+  if (payload.description !== undefined) effective.description = payload.description === null ? "" : String(payload.description);
+
+  if (payload.tools !== undefined) effective.tools = payload.tools === null ? [] : payload.tools;
+  if (payload.skills !== undefined) effective.skills = payload.skills === null ? [] : payload.skills;
+  if (payload.mcp_servers !== undefined) effective.mcp_servers = payload.mcp_servers === null ? [] : payload.mcp_servers;
+  if (payload.callable_agents !== undefined) effective.callable_agents = payload.callable_agents === null ? [] : payload.callable_agents;
+  if ((payload as any).multiagent?.agents !== undefined) {
+    if (!effective.multiagent) effective.multiagent = {};
+    effective.multiagent.agents = (payload as any).multiagent.agents;
+  }
+  if (payload.enable_general_subagent !== undefined) {
+    effective.enable_general_subagent = payload.enable_general_subagent;
+  }
+
+  if (payload.metadata !== undefined && typeof payload.metadata === "object" && payload.metadata !== null) {
+    const merged: Record<string, unknown> = { ...((agent as any).metadata || {}) };
+    for (const [k, v] of Object.entries(payload.metadata as Record<string, unknown>)) {
+      if (v === "" || v === null) {
+        delete merged[k];
+      } else {
+        merged[k] = v;
+      }
+    }
+    effective.metadata = merged;
+  }
+
+  const payloadHarness = (payload._oma as any)?.harness ?? (payload as any).harness;
+  if (payloadHarness !== undefined) {
+    if (!effective._oma) effective._oma = {};
+    effective._oma.harness = payloadHarness;
+    effective.harness = payloadHarness;
+  }
+  if ((payload._oma as any)?.runtime_binding !== undefined) {
+    if (!effective._oma) effective._oma = {};
+    effective._oma.runtime_binding = (payload._oma as any).runtime_binding;
+  }
+
+  return effective;
+}
+
 function AgentDiffSummary({
   agent,
   payload,
@@ -985,19 +1031,21 @@ function AgentDiffSummary({
   agent: Agent;
   payload: Record<string, unknown>;
 }) {
-  const oldModel = typeof agent.model === "string" ? agent.model : agent.model?.id;
-  const newModel = typeof payload.model === "string" ? payload.model : (payload.model as any)?.id;
+  const effective = computeEffectiveAgent(agent, payload);
 
-  const isNameChanged = agent.name !== payload.name;
+  const oldModel = typeof agent.model === "string" ? agent.model : agent.model?.id;
+  const newModel = typeof effective.model === "string" ? effective.model : (effective.model as any)?.id;
+
+  const isNameChanged = agent.name !== effective.name;
   const isModelChanged = oldModel !== newModel;
-  const isSystemChanged = (agent.system || "") !== (String(payload.system || ""));
-  const isDescChanged = (agent.description || "") !== (String(payload.description || ""));
+  const isSystemChanged = (agent.system || "") !== (effective.system || "");
+  const isDescChanged = (agent.description || "") !== (effective.description || "");
 
   // Skills
   const oldSkills = (agent.skills || []).map(
     (s: any) => `${s.skill_id || s.id || ""}${s.version ? `@${s.version}` : ""}`,
   );
-  const newSkills = (((payload.skills as any[]) || []).map(
+  const newSkills = (((effective.skills as any[]) || []).map(
     (s: any) => `${s.skill_id || s.id || ""}${s.version ? `@${s.version}` : ""}`,
   ));
   const addedSkills = newSkills.filter((s) => !oldSkills.includes(s));
@@ -1007,7 +1055,7 @@ function AgentDiffSummary({
   const oldMcps = (agent.mcp_servers || []).map(
     (m: any) => `${m.name || ""} (${m.url || m.type || "url"})`,
   );
-  const newMcps = (((payload.mcp_servers as any[]) || []).map(
+  const newMcps = (((effective.mcp_servers as any[]) || []).map(
     (m: any) => `${m.name || ""} (${m.url || m.type || "url"})`,
   ));
   const addedMcps = newMcps.filter((m) => !oldMcps.includes(m));
@@ -1018,19 +1066,19 @@ function AgentDiffSummary({
     (c: any) => c.id,
   );
   const newCallables = (
-    ((payload.callable_agents || (payload.multiagent as any)?.agents) as any[]) || []
+    ((effective.callable_agents || (effective.multiagent as any)?.agents) as any[]) || []
   ).map((c: any) => c.id);
   const addedCallables = newCallables.filter((c: string) => !oldCallables.includes(c));
   const removedCallables = oldCallables.filter((c: string) => !newCallables.includes(c));
 
   // General Subagent
   const oldGeneralSubagent = Boolean(agent.enable_general_subagent);
-  const newGeneralSubagent = Boolean(payload.enable_general_subagent);
+  const newGeneralSubagent = Boolean(effective.enable_general_subagent);
   const isGeneralSubagentChanged = oldGeneralSubagent !== newGeneralSubagent;
 
   // Tools configuration
   const oldToolset = (agent.tools || []).find((t: any) => t.type === "agent_toolset_20260401");
-  const newToolset = ((payload.tools as any[]) || []).find(
+  const newToolset = ((effective.tools as any[]) || []).find(
     (t: any) => t.type === "agent_toolset_20260401",
   );
   const oldToolDefaultEnabled = oldToolset?.default_config?.enabled ?? true;
@@ -1067,11 +1115,11 @@ function AgentDiffSummary({
 
   // Runtime / Harness
   const oldHarness = agent._oma?.harness || (agent as any).harness || "default";
-  const newHarness = (payload._oma as any)?.harness || (payload as any).harness || "default";
+  const newHarness = effective._oma?.harness || (effective as any).harness || "default";
   const isHarnessChanged = oldHarness !== newHarness;
 
   const oldRuntimeId = agent._oma?.runtime_binding?.runtime_id;
-  const newRuntimeId = (payload._oma as any)?.runtime_binding?.runtime_id;
+  const newRuntimeId = effective._oma?.runtime_binding?.runtime_id;
   const isRuntimeChanged = (oldRuntimeId || "") !== (newRuntimeId || "");
 
   const hasAnyChanges =

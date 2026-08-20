@@ -1,6 +1,8 @@
+ALTER TABLE "sessions" ALTER COLUMN "memory_frozen_at" TYPE bigint;--> statement-breakpoint
 ALTER TABLE "workspace_backups" ADD COLUMN IF NOT EXISTS "environment_id" text;--> statement-breakpoint
 ALTER TABLE "workspace_backups" ADD COLUMN IF NOT EXISTS "backup_handle" text;--> statement-breakpoint
 ALTER TABLE "workspace_backups" ADD COLUMN IF NOT EXISTS "source_session_id" text;--> statement-breakpoint
+ALTER TABLE "workspace_backups" ALTER COLUMN "id" SET DEFAULT ('wsb_' || md5(random()::text || clock_timestamp()::text));--> statement-breakpoint
 ALTER TABLE "workspace_backups" ALTER COLUMN "session_id" DROP NOT NULL;--> statement-breakpoint
 ALTER TABLE "workspace_backups" ALTER COLUMN "blob_key" DROP NOT NULL;--> statement-breakpoint
 ALTER TABLE "workspace_backups" ALTER COLUMN "size_bytes" DROP NOT NULL;--> statement-breakpoint

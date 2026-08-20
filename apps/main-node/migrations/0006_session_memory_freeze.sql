@@ -12,4 +12,4 @@
 -- drizzle schema (CF never gets the column), so a snapshot containing it
 -- would make the next drizzle-kit generate emit a DROP COLUMN.
 
-ALTER TABLE "sessions" ADD COLUMN "memory_frozen_at" bigint;
+ALTER TABLE "sessions" ADD COLUMN "memory_frozen_at" integer;

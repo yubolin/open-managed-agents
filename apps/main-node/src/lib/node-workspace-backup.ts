@@ -80,15 +80,14 @@ export class NodeWorkspaceBackupService implements WorkspaceBackupService {
       },
     });
     const now = this.nowMs();
-    // Schema after apps/main/migrations/0011_workspace_backups.sql:
-    //   id              BIGSERIAL PRIMARY KEY  (auto)
-    //   tenant_id       TEXT
-    //   environment_id  TEXT NOT NULL  ← required
-    //   backup_handle   TEXT NOT NULL  ← was blob_key in pre-0011 applySchema
-    //   created_at, expires_at  BIGINT
-    //   source_session_id  TEXT  ← was session_id in pre-0011
-    // The pre-0011 columns (id=TEXT, session_id, blob_key, size_bytes) are
-    // gone; we serialize the handle JSON into backup_handle so the existing
+    // Schema for workspace_backups:
+    //   id              TEXT (PG, default wsb_...) / INTEGER (SQLite AUTOINCREMENT)
+    //   tenant_id       TEXT NOT NULL
+    //   environment_id  TEXT (or synthetic session_id fallback)
+    //   backup_handle   TEXT NOT NULL (JSON containing handle id & dir)
+    //   created_at, expires_at  BIGINT NOT NULL
+    //   source_session_id  TEXT
+    // We serialize the handle JSON into backup_handle so the existing
     // BackupHandle shape (id+dir) round-trips through one column.
     const handleJson = JSON.stringify({ id, dir: blobKey });
     await this.deps.sql
