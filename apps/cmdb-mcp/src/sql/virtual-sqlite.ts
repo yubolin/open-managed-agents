@@ -96,18 +96,23 @@ export class VirtualSqliteDb {
       try {
         // 1. Fetch Tenants
         let tenants: Array<{ tenant_id: string; tenant_name: string; role?: string }> = [];
+        let tenantsFetched = false;
         try {
           const res = await provider.request<
             Array<{ tenant_id: string; tenant_name: string; role?: string }>
           >("/api/v1/auth/tenants");
           if (Array.isArray(res)) {
             tenants = res;
+            tenantsFetched = true;
           }
         } catch (err) {
-          this.logger.warn({ err: String(err) }, "VirtualSqlite: failed to fetch tenants");
+          this.logger.warn(
+            { err: String(err) },
+            "VirtualSqlite: failed to fetch tenants, preserving cached table",
+          );
         }
 
-        // 2. Fetch Assets (with full pagination loop)
+        // 2. Fetch Assets (with full pagination loop) - Required
         const allAssets: Array<Record<string, unknown>> = [];
         let page = 1;
         const pageSize = 500;
@@ -131,9 +136,10 @@ export class VirtualSqliteDb {
 
         // 3. Fetch Relations (with pagination)
         const allRelations: Array<Record<string, unknown>> = [];
-        let relPage = 1;
-        while (true) {
-          try {
+        let relationsFetched = false;
+        try {
+          let relPage = 1;
+          while (true) {
             const relsRes = await provider.request<{
               items?: Array<Record<string, unknown>>;
               total?: number;
@@ -149,22 +155,28 @@ export class VirtualSqliteDb {
               break;
             }
             relPage++;
-          } catch {
-            break;
           }
+          relationsFetched = true;
+        } catch (err) {
+          this.logger.warn(
+            { err: String(err) },
+            "VirtualSqlite: failed to fetch relations, preserving cached table",
+          );
         }
 
-        // 4. Atomic transaction replace in SQLite (purges deleted records)
+        // 4. Atomic transaction replace in SQLite (only replaces successfully fetched tables)
         this.db.exec("BEGIN TRANSACTION;");
         try {
-          // Replace tenants
-          this.db.exec("DELETE FROM tenants;");
-          if (tenants.length > 0) {
-            const insertTenant = this.db.prepare(
-              "INSERT INTO tenants (tenant_id, tenant_name, role) VALUES (?, ?, ?)",
-            );
-            for (const t of tenants) {
-              insertTenant.run(t.tenant_id, t.tenant_name || t.tenant_id, t.role || "user");
+          // Replace tenants ONLY if successfully fetched
+          if (tenantsFetched) {
+            this.db.exec("DELETE FROM tenants;");
+            if (tenants.length > 0) {
+              const insertTenant = this.db.prepare(
+                "INSERT INTO tenants (tenant_id, tenant_name, role) VALUES (?, ?, ?)",
+              );
+              for (const t of tenants) {
+                insertTenant.run(t.tenant_id, t.tenant_name || t.tenant_id, t.role || "user");
+              }
             }
           }
 
@@ -230,20 +242,22 @@ export class VirtualSqliteDb {
             );
           }
 
-          // Replace relations
-          this.db.exec("DELETE FROM relations;");
-          if (allRelations.length > 0) {
-            const insertRel = this.db.prepare(
-              "INSERT INTO relations (id, source_id, target_id, relation_type, created_at) VALUES (?, ?, ?, ?, ?)",
-            );
-            for (const r of allRelations) {
-              insertRel.run(
-                String(r.id || `${r.source_id}->${r.target_id}`),
-                String(r.source_id || ""),
-                String(r.target_id || ""),
-                String(r.relation_type || "depends_on"),
-                r.created_at ? String(r.created_at) : null,
+          // Replace relations ONLY if successfully fetched
+          if (relationsFetched) {
+            this.db.exec("DELETE FROM relations;");
+            if (allRelations.length > 0) {
+              const insertRel = this.db.prepare(
+                "INSERT INTO relations (id, source_id, target_id, relation_type, created_at) VALUES (?, ?, ?, ?, ?)",
               );
+              for (const r of allRelations) {
+                insertRel.run(
+                  String(r.id || `${r.source_id}->${r.target_id}`),
+                  String(r.source_id || ""),
+                  String(r.target_id || ""),
+                  String(r.relation_type || "depends_on"),
+                  r.created_at ? String(r.created_at) : null,
+                );
+              }
             }
           }
 

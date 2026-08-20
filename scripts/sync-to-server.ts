@@ -44,9 +44,12 @@ function generateUpsertSql(
       .map((c) => `"${c}" = EXCLUDED."${c}"`)
       .join(", ");
 
+    const hasTenant = cols.includes("tenant_id");
     const conflictClause =
       conflictKey.length > 0
-        ? `ON CONFLICT (${conflictKey.map((k) => `"${k}"`).join(", ")}) DO UPDATE SET ${updateSets}`
+        ? hasTenant
+          ? `ON CONFLICT (${conflictKey.map((k) => `"${k}"`).join(", ")}) DO UPDATE SET ${updateSets} WHERE "${tableName}"."tenant_id" = EXCLUDED."tenant_id"`
+          : `ON CONFLICT (${conflictKey.map((k) => `"${k}"`).join(", ")}) DO NOTHING`
         : "ON CONFLICT DO NOTHING";
 
     sqls.push(`INSERT INTO "${tableName}" (${colNames}) VALUES (${vals}) ${conflictClause};`);

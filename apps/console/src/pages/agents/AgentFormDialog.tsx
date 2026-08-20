@@ -134,6 +134,7 @@ export function AgentFormDialog({
   const [codeValue, setCodeValue] = useState("");
   const [showMcpPicker, setShowMcpPicker] = useState(false);
   const [showConfirmDiff, setShowConfirmDiff] = useState(false);
+  const [pendingPayload, setPendingPayload] = useState<Record<string, unknown> | null>(null);
   const [isSaving, setIsSaving] = useState(false);
 
   const createDialogRef = useRef<HTMLDivElement>(null);
@@ -334,25 +335,26 @@ export function AgentFormDialog({
         },
       };
     } else if (isEdit) {
-      payload._oma = {
-        harness: "default",
-        runtime_binding: null,
-      };
+      const hadRuntime = !!agent?._oma?.runtime_binding;
+      const existingHarness = agent?._oma?.harness ?? (agent as any)?.harness;
+      if (hadRuntime) {
+        payload._oma = {
+          ...(existingHarness && existingHarness !== "acp-proxy"
+            ? { harness: existingHarness }
+            : { harness: "default" }),
+          runtime_binding: null,
+        };
+      } else if (existingHarness) {
+        payload._oma = {
+          harness: existingHarness,
+        };
+      }
     }
     return payload;
   };
 
   const handleSaveClick = () => {
-    if (isEdit) {
-      setShowConfirmDiff(true);
-    } else {
-      executeSave();
-    }
-  };
-
-  const executeSave = async () => {
     setCreateError("");
-    setIsSaving(true);
     try {
       let payload: Record<string, unknown>;
       if (createMode === "form") {
@@ -364,7 +366,6 @@ export function AgentFormDialog({
             : JSON.parse(codeValue);
         if (!parsed.name) {
           setCreateError("name is required");
-          setIsSaving(false);
           return;
         }
         if (!parsed.tools) parsed.tools = [{ type: "agent_toolset_20260401" }];
@@ -375,11 +376,40 @@ export function AgentFormDialog({
         payload.version = agent.version;
       }
 
+      if (isEdit) {
+        setPendingPayload(payload);
+        setShowConfirmDiff(true);
+      } else {
+        executeSave(payload);
+      }
+    } catch (e: any) {
+      setCreateError(e?.message || "Invalid configuration syntax");
+    }
+  };
+
+  const executeSave = async (overridePayload?: Record<string, unknown>) => {
+    setCreateError("");
+    setIsSaving(true);
+    try {
+      const payload =
+        overridePayload ||
+        pendingPayload ||
+        (createMode === "form" ? buildPayload() : JSON.parse(codeValue));
+      if (!payload.name) {
+        setCreateError("name is required");
+        setIsSaving(false);
+        return;
+      }
+      if (isEdit && agent?.version !== undefined && !("version" in payload)) {
+        payload.version = agent.version;
+      }
+
       const savedAgent = await api<Agent>(isEdit ? `/v1/agents/${agent.id}` : "/v1/agents", {
         method: isEdit ? "PUT" : "POST",
         body: JSON.stringify(payload),
       });
       setShowConfirmDiff(false);
+      setPendingPayload(null);
       closeCreate();
       onCreated?.();
       if (!isEdit) {
@@ -902,7 +932,7 @@ export function AgentFormDialog({
       </div>
 
       {/* Confirmation & Visual Diff Modal before applying edit */}
-      {showConfirmDiff && agent && (
+      {showConfirmDiff && agent && pendingPayload && (
         <Modal
           open={showConfirmDiff}
           onClose={() => !isSaving && setShowConfirmDiff(false)}
@@ -914,20 +944,23 @@ export function AgentFormDialog({
               <Button
                 variant="outline"
                 disabled={isSaving}
-                onClick={() => setShowConfirmDiff(false)}
+                onClick={() => {
+                  setShowConfirmDiff(false);
+                  setPendingPayload(null);
+                }}
               >
                 Back to Edit
               </Button>
               <Button
                 disabled={isSaving}
-                onClick={executeSave}
+                onClick={() => executeSave(pendingPayload)}
               >
                 {isSaving ? "Saving..." : `Confirm & Publish v${agent.version + 1}`}
               </Button>
             </div>
           }
         >
-          <AgentDiffSummary agent={agent} form={form} />
+          <AgentDiffSummary agent={agent} payload={pendingPayload} />
         </Modal>
       )}
 
@@ -947,28 +980,99 @@ export function AgentFormDialog({
 
 function AgentDiffSummary({
   agent,
-  form,
+  payload,
 }: {
   agent: Agent;
-  form: FormState;
+  payload: Record<string, unknown>;
 }) {
   const oldModel = typeof agent.model === "string" ? agent.model : agent.model?.id;
-  const oldSkills = (agent.skills || []).map((s: any) => s.skill_id || s.id);
-  const newSkills = form.skills.map((s) => s.skill_id);
+  const newModel = typeof payload.model === "string" ? payload.model : (payload.model as any)?.id;
 
+  const isNameChanged = agent.name !== payload.name;
+  const isModelChanged = oldModel !== newModel;
+  const isSystemChanged = (agent.system || "") !== (String(payload.system || ""));
+  const isDescChanged = (agent.description || "") !== (String(payload.description || ""));
+
+  // Skills
+  const oldSkills = (agent.skills || []).map(
+    (s: any) => `${s.skill_id || s.id || ""}${s.version ? `@${s.version}` : ""}`,
+  );
+  const newSkills = (((payload.skills as any[]) || []).map(
+    (s: any) => `${s.skill_id || s.id || ""}${s.version ? `@${s.version}` : ""}`,
+  ));
   const addedSkills = newSkills.filter((s) => !oldSkills.includes(s));
   const removedSkills = oldSkills.filter((s) => !newSkills.includes(s));
 
-  const oldMcps = (agent.mcp_servers || []).map((m: any) => m.name);
-  const newMcps = form.mcpServers.map((m) => m.name).filter(Boolean);
-
+  // MCP Servers
+  const oldMcps = (agent.mcp_servers || []).map(
+    (m: any) => `${m.name || ""} (${m.url || m.type || "url"})`,
+  );
+  const newMcps = (((payload.mcp_servers as any[]) || []).map(
+    (m: any) => `${m.name || ""} (${m.url || m.type || "url"})`,
+  ));
   const addedMcps = newMcps.filter((m) => !oldMcps.includes(m));
   const removedMcps = oldMcps.filter((m) => !newMcps.includes(m));
 
-  const isNameChanged = agent.name !== form.name;
-  const isModelChanged = oldModel !== form.model;
-  const isSystemChanged = (agent.system || "") !== form.system;
-  const isDescChanged = (agent.description || "") !== form.description;
+  // Callable Agents
+  const oldCallables = (agent.callable_agents || agent.multiagent?.agents || []).map(
+    (c: any) => c.id,
+  );
+  const newCallables = (
+    ((payload.callable_agents || (payload.multiagent as any)?.agents) as any[]) || []
+  ).map((c: any) => c.id);
+  const addedCallables = newCallables.filter((c: string) => !oldCallables.includes(c));
+  const removedCallables = oldCallables.filter((c: string) => !newCallables.includes(c));
+
+  // General Subagent
+  const oldGeneralSubagent = Boolean(agent.enable_general_subagent);
+  const newGeneralSubagent = Boolean(payload.enable_general_subagent);
+  const isGeneralSubagentChanged = oldGeneralSubagent !== newGeneralSubagent;
+
+  // Tools configuration
+  const oldToolset = (agent.tools || []).find((t: any) => t.type === "agent_toolset_20260401");
+  const newToolset = ((payload.tools as any[]) || []).find(
+    (t: any) => t.type === "agent_toolset_20260401",
+  );
+  const oldToolDefaultEnabled = oldToolset?.default_config?.enabled ?? true;
+  const newToolDefaultEnabled = newToolset?.default_config?.enabled ?? true;
+  const isToolDefaultEnabledChanged = oldToolDefaultEnabled !== newToolDefaultEnabled;
+  const oldToolDefaultPerm = oldToolset?.default_config?.permission_policy?.type ?? "always_allow";
+  const newToolDefaultPerm = newToolset?.default_config?.permission_policy?.type ?? "always_allow";
+  const isToolDefaultPermChanged = oldToolDefaultPerm !== newToolDefaultPerm;
+
+  const oldToolOverrides: Record<string, string> = {};
+  if (oldToolset?.configs) {
+    for (const c of oldToolset.configs) {
+      if (c.enabled === false) oldToolOverrides[c.name] = "disabled";
+      else if (c.permission_policy?.type === "always_ask") oldToolOverrides[c.name] = "always_ask";
+      else if (c.permission_policy?.type === "always_allow")
+        oldToolOverrides[c.name] = "always_allow";
+    }
+  }
+  const newToolOverrides: Record<string, string> = {};
+  if (newToolset?.configs) {
+    for (const c of newToolset.configs) {
+      if (c.enabled === false) newToolOverrides[c.name] = "disabled";
+      else if (c.permission_policy?.type === "always_ask") newToolOverrides[c.name] = "always_ask";
+      else if (c.permission_policy?.type === "always_allow")
+        newToolOverrides[c.name] = "always_allow";
+    }
+  }
+  const toolOverrideKeys = Array.from(
+    new Set([...Object.keys(oldToolOverrides), ...Object.keys(newToolOverrides)]),
+  );
+  const changedToolOverrides = toolOverrideKeys.filter(
+    (k) => (oldToolOverrides[k] || "inherit") !== (newToolOverrides[k] || "inherit"),
+  );
+
+  // Runtime / Harness
+  const oldHarness = agent._oma?.harness || (agent as any).harness || "default";
+  const newHarness = (payload._oma as any)?.harness || (payload as any).harness || "default";
+  const isHarnessChanged = oldHarness !== newHarness;
+
+  const oldRuntimeId = agent._oma?.runtime_binding?.runtime_id;
+  const newRuntimeId = (payload._oma as any)?.runtime_binding?.runtime_id;
+  const isRuntimeChanged = (oldRuntimeId || "") !== (newRuntimeId || "");
 
   const hasAnyChanges =
     isNameChanged ||
@@ -978,7 +1082,15 @@ function AgentDiffSummary({
     addedSkills.length > 0 ||
     removedSkills.length > 0 ||
     addedMcps.length > 0 ||
-    removedMcps.length > 0;
+    removedMcps.length > 0 ||
+    addedCallables.length > 0 ||
+    removedCallables.length > 0 ||
+    isGeneralSubagentChanged ||
+    isToolDefaultEnabledChanged ||
+    isToolDefaultPermChanged ||
+    changedToolOverrides.length > 0 ||
+    isHarnessChanged ||
+    isRuntimeChanged;
 
   return (
     <div className="space-y-4 text-sm">
@@ -996,7 +1108,9 @@ function AgentDiffSummary({
       </div>
 
       <div className="space-y-2.5">
-        <div className="text-xs font-semibold text-fg-muted uppercase tracking-wider">Change Summary</div>
+        <div className="text-xs font-semibold text-fg-muted uppercase tracking-wider">
+          Change Summary
+        </div>
 
         {!hasAnyChanges && (
           <div className="text-xs text-fg-subtle p-3 rounded bg-bg border border-border text-center">
@@ -1009,7 +1123,7 @@ function AgentDiffSummary({
             <span className="text-fg-muted text-xs">Agent Name</span>
             <span className="font-mono text-xs">
               <del className="text-danger mr-2">{agent.name}</del>
-              <ins className="text-success no-underline">{form.name}</ins>
+              <ins className="text-success no-underline">{String(payload.name)}</ins>
             </span>
           </div>
         )}
@@ -1019,7 +1133,7 @@ function AgentDiffSummary({
             <span className="text-fg-muted text-xs">Model</span>
             <span className="font-mono text-xs">
               <del className="text-danger mr-2">{oldModel}</del>
-              <ins className="text-success no-underline">{form.model}</ins>
+              <ins className="text-success no-underline">{newModel}</ins>
             </span>
           </div>
         )}
@@ -1038,17 +1152,77 @@ function AgentDiffSummary({
           </div>
         )}
 
+        {isHarnessChanged && (
+          <div className="flex items-center justify-between p-2 rounded bg-bg border border-border">
+            <span className="text-fg-muted text-xs">Harness</span>
+            <span className="font-mono text-xs">
+              <del className="text-danger mr-2">{oldHarness}</del>
+              <ins className="text-success no-underline">{newHarness}</ins>
+            </span>
+          </div>
+        )}
+
+        {isRuntimeChanged && (
+          <div className="flex items-center justify-between p-2 rounded bg-bg border border-border">
+            <span className="text-fg-muted text-xs">Local Runtime</span>
+            <span className="font-mono text-xs">
+              <del className="text-danger mr-2">{oldRuntimeId ? `Bound (${oldRuntimeId.slice(0, 8)})` : "Cloud"}</del>
+              <ins className="text-success no-underline">{newRuntimeId ? `Bound (${newRuntimeId.slice(0, 8)})` : "Cloud"}</ins>
+            </span>
+          </div>
+        )}
+
+        {isGeneralSubagentChanged && (
+          <div className="flex items-center justify-between p-2 rounded bg-bg border border-border">
+            <span className="text-fg-muted text-xs">General Subagent</span>
+            <span className="font-mono text-xs">
+              <del className="text-danger mr-2">{oldGeneralSubagent ? "Enabled" : "Disabled"}</del>
+              <ins className="text-success no-underline">{newGeneralSubagent ? "Enabled" : "Disabled"}</ins>
+            </span>
+          </div>
+        )}
+
+        {(isToolDefaultEnabledChanged || isToolDefaultPermChanged || changedToolOverrides.length > 0) && (
+          <div className="p-2.5 rounded bg-bg border border-border space-y-1.5">
+            <span className="text-fg-muted block text-xs">Tools Configuration:</span>
+            {isToolDefaultEnabledChanged && (
+              <div className="text-xs">
+                Default State: <del className="text-danger mr-1">{oldToolDefaultEnabled ? "Enabled" : "Disabled"}</del>
+                ➔ <ins className="text-success no-underline">{newToolDefaultEnabled ? "Enabled" : "Disabled"}</ins>
+              </div>
+            )}
+            {isToolDefaultPermChanged && (
+              <div className="text-xs">
+                Default Permission: <del className="text-danger mr-1">{oldToolDefaultPerm}</del>
+                ➔ <ins className="text-success no-underline">{newToolDefaultPerm}</ins>
+              </div>
+            )}
+            {changedToolOverrides.map((name) => (
+              <div key={name} className="text-xs font-mono">
+                {name}: <del className="text-danger mr-1">{oldToolOverrides[name] || "inherit"}</del>
+                ➔ <ins className="text-success no-underline">{newToolOverrides[name] || "inherit"}</ins>
+              </div>
+            ))}
+          </div>
+        )}
+
         {(addedSkills.length > 0 || removedSkills.length > 0) && (
           <div className="p-2.5 rounded bg-bg border border-border space-y-1.5">
             <span className="text-fg-muted block text-xs">Skills Changes:</span>
             <div className="flex flex-wrap gap-1.5">
               {addedSkills.map((s) => (
-                <span key={s} className="px-2 py-0.5 rounded bg-success-subtle text-success text-xs font-mono">
+                <span
+                  key={s}
+                  className="px-2 py-0.5 rounded bg-success-subtle text-success text-xs font-mono"
+                >
                   + {s}
                 </span>
               ))}
               {removedSkills.map((s) => (
-                <span key={s} className="px-2 py-0.5 rounded bg-danger-subtle text-danger text-xs font-mono">
+                <span
+                  key={s}
+                  className="px-2 py-0.5 rounded bg-danger-subtle text-danger text-xs font-mono"
+                >
                   - {s}
                 </span>
               ))}
@@ -1061,13 +1235,43 @@ function AgentDiffSummary({
             <span className="text-fg-muted block text-xs">MCP Servers Changes:</span>
             <div className="flex flex-wrap gap-1.5">
               {addedMcps.map((m) => (
-                <span key={m} className="px-2 py-0.5 rounded bg-success-subtle text-success text-xs font-mono">
+                <span
+                  key={m}
+                  className="px-2 py-0.5 rounded bg-success-subtle text-success text-xs font-mono"
+                >
                   + {m}
                 </span>
               ))}
               {removedMcps.map((m) => (
-                <span key={m} className="px-2 py-0.5 rounded bg-danger-subtle text-danger text-xs font-mono">
+                <span
+                  key={m}
+                  className="px-2 py-0.5 rounded bg-danger-subtle text-danger text-xs font-mono"
+                >
                   - {m}
+                </span>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {(addedCallables.length > 0 || removedCallables.length > 0) && (
+          <div className="p-2.5 rounded bg-bg border border-border space-y-1.5">
+            <span className="text-fg-muted block text-xs">Callable Agents Changes:</span>
+            <div className="flex flex-wrap gap-1.5">
+              {addedCallables.map((c) => (
+                <span
+                  key={c}
+                  className="px-2 py-0.5 rounded bg-success-subtle text-success text-xs font-mono"
+                >
+                  + {c}
+                </span>
+              ))}
+              {removedCallables.map((c) => (
+                <span
+                  key={c}
+                  className="px-2 py-0.5 rounded bg-danger-subtle text-danger text-xs font-mono"
+                >
+                  - {c}
                 </span>
               ))}
             </div>
@@ -1076,7 +1280,8 @@ function AgentDiffSummary({
       </div>
 
       <div className="text-xs text-fg-subtle pt-2 border-t border-border/50">
-        💡 Note: Saving publishes <strong>v{agent.version + 1}</strong> as the active default for subsequent sessions; existing sessions remain locked to their original version.
+        💡 Note: Saving publishes <strong>v{agent.version + 1}</strong> as the active default for
+        subsequent sessions; existing sessions remain locked to their original version.
       </div>
     </div>
   );

@@ -106,4 +106,37 @@ describe("VirtualSqliteDb", () => {
     await expect(db.ensureSynced(failingProvider)).rejects.toThrow("Network timeout to CMDB");
     expect(failingProvider.request).toHaveBeenCalledTimes(4); // 2 auth + 2 assets
   });
+
+  it("preserves cached relations when relations API encounters a transient failure", async () => {
+    const db = new VirtualSqliteDb(undefined, 0);
+
+    let relationsFail = false;
+    const provider: SyncProvider = {
+      request: vi.fn().mockImplementation(async (path: string) => {
+        if (path === "/api/v1/assets/") {
+          return { items: [{ id: "ast-1", instance_name: "web-01" }], total: 1 };
+        }
+        if (path === "/api/v1/relations/") {
+          if (relationsFail) {
+            throw new Error("Relations service down");
+          }
+          return { items: [{ id: "rel-1", source_id: "ast-1", target_id: "ast-2", relation_type: "calls" }] };
+        }
+        return [];
+      }),
+    };
+
+    // First sync succeeds for all tables
+    await db.ensureSynced(provider);
+    expect(db.executeQuery("SELECT count(*) as cnt FROM relations").rows[0]).toMatchObject({ cnt: 1 });
+
+    // Second sync: relations API fails, but assets succeed
+    relationsFail = true;
+    await db.ensureSynced(provider);
+
+    // Old relations must still be preserved in virtual SQLite
+    const preserved = db.executeQuery("SELECT id, source_id, target_id FROM relations");
+    expect(preserved.row_count).toBe(1);
+    expect(preserved.rows[0]).toMatchObject({ id: "rel-1", source_id: "ast-1", target_id: "ast-2" });
+  });
 });

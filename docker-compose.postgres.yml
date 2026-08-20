@@ -51,8 +51,8 @@ services:
       BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET:-}
       BETTER_AUTH_URL: ${BETTER_AUTH_URL:-http://117.72.219.106:8787}
       AUTH_COOKIE_SECURE: ${AUTH_COOKIE_SECURE:-0}
-      AUTH_DISABLED: ${AUTH_DISABLED:-}
-      AUTH_DISABLE_SIGN_UP: ${AUTH_DISABLE_SIGN_UP:-1}
+      # Set AUTH_DISABLE_SIGN_UP=1 in .env after registering the initial admin account
+      AUTH_DISABLE_SIGN_UP: ${AUTH_DISABLE_SIGN_UP:-0}
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://117.72.219.106:8787}
     volumes:
       - ./data:/app/data
@@ -151,7 +151,7 @@ services:
       oma-vault:
         condition: service_started
     ports:
-      - "3910:3910"
+      - "${CMDB_MCP_BIND_HOST:-127.0.0.1}:3910:3910"
     mem_limit: 256m
     restart: unless-stopped
     healthcheck:

@@ -94,6 +94,7 @@ export function buildBetterAuth(opts: BuildBetterAuthOpts) {
         otpLength: 6,
         expiresIn: 300,
         sendVerificationOnSignUp: requireVerify,
+        disableSignUp,
         async sendVerificationOTP({ email, otp, type }) {
           const labels: Record<string, string> = {
             "sign-in": "Your sign-in code",

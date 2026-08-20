@@ -61,7 +61,7 @@ COPY tsconfig.json ./
 # middleware picks it up. Skip with --build-arg SKIP_CONSOLE=1 if you
 # want a smaller API-only image (e.g. for SDK-only deploys).
 ARG SKIP_CONSOLE=0
-RUN if [ "$SKIP_CONSOLE" != "1" ] && [ ! -f apps/console/dist/index.html ]; then \
+RUN if [ ! -f apps/console/dist/index.html ]; then \
       pnpm --filter managed-agents-console build; \
     else \
       mkdir -p apps/console/dist; \
