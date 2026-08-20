@@ -1044,11 +1044,15 @@ const commands: Cmd[] = [
   },
   {
     group: "Skills", match: ["skills", "install"], needsArg: true,
-    usage: "oma skills install <slug>", desc: "Install from ClawHub",
-    http: "POST   /v1/clawhub/install {slug}",
+    usage: "oma skills install <slug> <version>", desc: "Install from ClawHub (pinned version required)",
+    http: "POST   /v1/clawhub/install {slug, version}",
     async run(config, args) {
-      console.log(`Installing ${args[0]} from ClawHub...`);
-      const skill = await apiFetch<{ id: string; display_title: string }>(config, "/v1/clawhub/install", { method: "POST", body: JSON.stringify({ slug: args[0] }) });
+      if (!args[1]) {
+        console.error("Usage: oma skills install <slug> <version>  (latest is not accepted; pin an explicit version)");
+        process.exit(2);
+      }
+      console.log(`Installing ${args[0]}@${args[1]} from ClawHub...`);
+      const skill = await apiFetch<{ id: string; display_title: string }>(config, "/v1/clawhub/install", { method: "POST", body: JSON.stringify({ slug: args[0], version: args[1] }) });
       console.log(`Installed: ${skill.display_title} (${skill.id})`);
     },
   },

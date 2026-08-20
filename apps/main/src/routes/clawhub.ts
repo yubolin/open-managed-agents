@@ -38,18 +38,42 @@ app.get("/search", async (c) => {
 });
 
 // POST /v1/clawhub/install — install a skill from ClawHub
+//
+// SDS v0.2 §1.6 / §3.2: `version` is REQUIRED and must be explicit.
+// "latest" is forbidden — callers must pin a version so installs are
+// reproducible and the sha256 hash pinned at install time can be
+// re-checked at attach time. Backwards-incompatible with v0.1 callers
+// that omitted the field; update `oma skills install <slug> <version>`.
 app.post("/install", async (c) => {
   const t = c.get("tenant_id");
-  const body = await c.req.json<{ slug: string }>();
+  const body = await c.req.json<{ slug?: string; version?: string }>();
   if (!body.slug) return c.json({ error: "slug is required" }, 400);
+  if (!body.version) {
+    return c.json(
+      { error: "version is required (latest is not allowed; pass an explicit version)" },
+      400,
+    );
+  }
+  if (body.version === "latest") {
+    return c.json(
+      { error: "version 'latest' is forbidden; pass an explicit version pin" },
+      400,
+    );
+  }
 
   // 1. Get package metadata
   const metaRes = await fetch(`${CLAWHUB_BASE}/packages/${encodeURIComponent(body.slug)}`);
   if (!metaRes.ok) return c.json({ error: `Skill "${body.slug}" not found on ClawHub` }, 404);
   const meta = (await metaRes.json()) as { package: ClawHubPackage };
+  // Refuse if the package has no published version (caller should never see
+  // "latest" either, but a missing latestVersion means the skill is broken
+  // upstream — fail loud rather than guess).
+  if (!meta.package.latestVersion) {
+    return c.json({ error: "ClawHub package has no published version" }, 502);
+  }
 
   // 2. Download zip
-  const dlRes = await fetch(`${CLAWHUB_BASE}/download?slug=${encodeURIComponent(body.slug)}`);
+  const dlRes = await fetch(`${CLAWHUB_BASE}/download?slug=${encodeURIComponent(body.slug)}&version=${encodeURIComponent(body.version)}`);
   if (!dlRes.ok) return c.json({ error: `Failed to download skill: ${dlRes.status}` }, 502);
 
   // 3. Extract files from zip
