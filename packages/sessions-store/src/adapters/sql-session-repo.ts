@@ -203,13 +203,13 @@ export class SqlSessionRepo implements SessionRepo {
   ): Promise<number> {
     const conds = [eq(sessions.tenant_id, tenantId)];
     if (!opts.includeArchived) conds.push(isNull(sessions.archived_at));
-    const row = await getOne<{ c: number }>(
+    const row = await getOne<{ c: number | string }>(
       this.db
         .select({ c: sql<number>`COUNT(*)` })
         .from(sessions)
         .where(and(...conds)),
     );
-    return row?.c ?? 0;
+    return Number(row?.c ?? 0);
   }
 
   async update(
@@ -384,20 +384,20 @@ export class SqlSessionRepo implements SessionRepo {
   }
 
   async countResources(sessionId: string): Promise<number> {
-    const row = await getOne<{ c: number }>(
+    const row = await getOne<{ c: number | string }>(
       this.db
         .select({ c: sql<number>`COUNT(*)` })
         .from(session_resources)
         .where(eq(session_resources.session_id, sessionId)),
     );
-    return row?.c ?? 0;
+    return Number(row?.c ?? 0);
   }
 
   async countResourcesByType(
     sessionId: string,
     type: SessionResource["type"],
   ): Promise<number> {
-    const row = await getOne<{ c: number }>(
+    const row = await getOne<{ c: number | string }>(
       this.db
         .select({ c: sql<number>`COUNT(*)` })
         .from(session_resources)
@@ -408,7 +408,7 @@ export class SqlSessionRepo implements SessionRepo {
           ),
         ),
     );
-    return row?.c ?? 0;
+    return Number(row?.c ?? 0);
   }
 
   async deleteResource(sessionId: string, resourceId: string): Promise<void> {

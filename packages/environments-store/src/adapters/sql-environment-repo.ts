@@ -150,13 +150,13 @@ export class SqlEnvironmentRepo implements EnvironmentRepo {
   ): Promise<number> {
     const conds = [eq(environments.tenant_id, tenantId)];
     if (!opts.includeArchived) conds.push(isNull(environments.archived_at));
-    const row = await getOne<{ c: number }>(
+    const row = await getOne<{ c: number | string }>(
       this.db
         .select({ c: sql<number>`COUNT(*)` })
         .from(environments)
         .where(and(...conds)),
     );
-    return row?.c ?? 0;
+    return Number(row?.c ?? 0);
   }
 
   async update(

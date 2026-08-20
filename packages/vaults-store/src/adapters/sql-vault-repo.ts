@@ -153,13 +153,13 @@ export class SqlVaultRepo implements VaultRepo {
   ): Promise<number> {
     const conditions = [eq(vaults.tenant_id, tenantId)];
     if (!opts.includeArchived) conditions.push(isNull(vaults.archived_at));
-    const row = await getOne<{ c: number }>(
+    const row = await getOne<{ c: number | string }>(
       this.db
         .select({ c: sql<number>`count(*)`.as("c") })
         .from(vaults)
         .where(and(...conditions)),
     );
-    return row?.c ?? 0;
+    return Number(row?.c ?? 0);
   }
 
   async update(

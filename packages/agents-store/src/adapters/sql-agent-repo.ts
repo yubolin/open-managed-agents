@@ -159,13 +159,13 @@ export class SqlAgentRepo implements AgentRepo {
   ): Promise<number> {
     const conds = [eq(agents.tenant_id, tenantId)];
     if (!opts.includeArchived) conds.push(isNull(agents.archived_at));
-    const row = await getOne<{ c: number }>(
+    const row = await getOne<{ c: number | string }>(
       this.db
         .select({ c: sql<number>`COUNT(*)` })
         .from(agents)
         .where(and(...conds)),
     );
-    return row?.c ?? 0;
+    return Number(row?.c ?? 0);
   }
 
   async updateWithVersionSnapshot(

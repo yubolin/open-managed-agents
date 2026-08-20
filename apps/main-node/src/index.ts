@@ -998,7 +998,7 @@ v1.route("/evals", buildEvalRoutes({
 }));
 
 v1.get("/stats", async (c) => {
-  const tenantId = c.get("tenant_id") || "default";
+  const tenantId = c.var.tenant_id || "default";
   const [
     agents,
     sessions,
@@ -1016,12 +1016,14 @@ v1.get("/stats", async (c) => {
   ]);
 
   return c.json({
-    agents: typeof agents === "number" ? agents : 0,
-    sessions: typeof sessions === "number" ? sessions : 0,
-    environments: typeof environments === "number" ? environments : 0,
-    vaults: typeof vaults === "number" ? vaults : 0,
+    agents: Number(agents) || 0,
+    sessions: Number(sessions) || 0,
+    environments: Number(environments) || 0,
+    vaults: Number(vaults) || 0,
     skills: 0,
-    model_cards: Array.isArray(modelCardsList) ? modelCardsList.length : 0,
+    model_cards: Array.isArray(modelCardsList)
+      ? modelCardsList.filter((card) => card.archived_at === null).length
+      : 0,
     api_keys: Array.isArray(apiKeysList) ? apiKeysList.length : 0,
   });
 });
