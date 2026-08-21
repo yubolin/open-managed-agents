@@ -176,9 +176,11 @@ services:
       context: ./docker/lark-mcp
     image: openma/lark-mcp:dev
     container_name: oma-lark-mcp
+    environment:
+      - NODE_OPTIONS=--max-old-space-size=512
     secrets:
       - lark-mcp-config
-    mem_limit: 512m
+    mem_limit: 768m
     restart: unless-stopped
 
 volumes:
