@@ -1,0 +1,5 @@
+{
+  "$comment": "Copy to secrets/lark-mcp-config.json (gitignored) and fill in. lark-mcp --config schema (docs/usage/configuration): appId, appSecret; tools/mode/host/port are deliberately NOT set here — the tool whitelist lives in the Dockerfile CMD so it is git-auditable and any change requires an image rebuild. Feishu app must have wiki:wiki:readonly + docx:document:readonly only, and be explicitly added to the target wiki spaces (see docs/integrations/feishu-kb-p0-sds.md).",
+  "appId": "cli_xxxxxxxxxxxxxxxx",
+  "appSecret": "REPLACE_ME"
+}

@@ -141,3 +141,30 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
+
+  # Feishu KB MCP sidecar — official lark-openapi-mcp (app identity,
+  # tenant_access_token) exposing a 4-tool read-only whitelist
+  # (mcp__feishu-kb__wiki_v2_space_list, wiki_v2_spaceNode_list, wiki_v2_space_getNode, docx_v1_document_rawContent) over
+  # Streamable HTTP at http://oma-lark-mcp:3000/mcp. The -t whitelist lives
+  # in the Dockerfile CMD (git-auditable); OMA's harness registers every
+  # tool a server returns, so the process-level whitelist is the only
+  # write-isolation boundary. Credentials come from the lark-mcp-config
+  # docker secret — cp docker/lark-mcp/config.example.json
+  # secrets/lark-mcp-config.json and fill in. No host port: internal bridge
+  # network only; cross-host deploys need ingress auth first
+  # (docs/integrations/feishu-kb-p0-sds.md §6).
+  oma-lark-mcp:
+    build:
+      context: ./docker/lark-mcp
+    image: openma/lark-mcp:dev
+    container_name: oma-lark-mcp
+    secrets:
+      - lark-mcp-config
+    mem_limit: 256m
+    restart: unless-stopped
+
+secrets:
+  # Feishu KB MCP credential config (appId/appSecret JSON). secrets/ is
+  # gitignored — the example lives at docker/lark-mcp/config.example.json.
+  lark-mcp-config:
+    file: ./secrets/lark-mcp-config.json
