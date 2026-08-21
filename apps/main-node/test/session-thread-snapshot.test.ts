@@ -83,6 +83,9 @@ describe("Node child thread frozen snapshot", () => {
       } as never,
       memoryService,
       sandboxOrchestrator: { provision: async () => {} } as never,
+      // Stub agents carry no skills — the skill read-path never runs.
+      skillKv: { get: async () => null },
+      skillBlobs: undefined,
       newEventLog: () => eventLog,
       buildSandbox: async () => ({}) as never,
       sandboxWorkdirRoot: "/tmp/oma-thread-snapshot-test",

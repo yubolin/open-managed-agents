@@ -115,16 +115,27 @@ agent 引导用户："绑定到当前 Agent 后需要新 Session 才生效"
 
 ### 2.7 Cloudflare / Node 能力边界
 
-| Runtime | search | install | attach | 行为 |
-|---------|--------|---------|--------|------|
-| CF | ✅ 真实实现 | ✅ 真实实现 | ✅ 真实实现 | 全功能 |
-| Node | ⚠️ 现状 200+空数组 | ❌ 501 Not Implemented | ⚠️ 走 agents 路由但 skill 解析未做 | 显式门控，不静默 |
+**双 lane 约定（2026-08-21 更新）**：Node 的 skill 写入有两条通道——
+1. **RPC 工具通道**（agent 会话内 `install_skill`/`attach_skill` → `createNodeSkillRpc`，2c3dca5）：**放行**，custom 类型经 confirmation guard + store 层 `agents.update` 落库（不经过 HTTP 路由的 F7 门）。
+2. **HTTP 直写通道**（Console/SDK 调 `PUT /v1/agents/:id` 携带 `skills[].type==="custom"`）：**维持 501 `{runtime:"node"}`**（F7）——Node 上 Console 编辑 custom skill 仍显式拒绝。
+
+**Node 读路径（2026-08-21 落地）**：SessionRegistry.build() 现按 CF session-do.ts:4417-4489 对齐——frozen agent snapshot 的 skills 解析为 `skill:<id>` platform reminders（custom 的 SKILL.md 经 `<skill name>` 内联，字节级同 CF）+ 沙箱挂载 skill 文件（workdir 相对 `.skills/<name>/`，CF 为 microVM 内 `/home/user/.skills`）。skill KV 由 InMemoryKvStore 换 SqlKvStore（安装元数据重启不丢）。
+
+| Runtime | search | install (RPC) | attach (RPC) | HTTP 直写 custom | 读路径（注入+挂载） |
+|---------|--------|---------|--------|------|------|
+| CF | ✅ | ✅ | ✅ | ✅ | ✅（`/home/user/.skills`）|
+| Node | ✅ (2c3dca5) | ✅ (2c3dca5) | ✅ (2c3dca5) | ❌ 501（F7）| ✅（2026-08-21，`.skills/`）|
+
+**已知缺口（记录在案，未在本切片处理）**：
+- `registerSkill` 全仓无调用方：builtin 技能（xlsx/pptx/pdf/docx）在**两个运行时**都不注入 prompt——resolveSkills 恒空。需产品决策 builtin 注册的归属（seed 脚本 vs 启动注册）。
+- Node `runSubAgent` 子代理路径 `platformReminders: []` 硬编码：子代理无 skill/memory reminders（既有债，先于本切片）。
+- Node 未处理 `agent.appendable_prompts`（CF 在 reminders 最前注入）。
+- F9 端到端 smoke 仍待服务器部署 + P2 操作员 key。
 
 **已实施 (commit 31eb117)**：Node 5 个 stub endpoint 改 501 显式拒绝。
 
 ⏳ **待实施**：
-- `attach_skill` 在 Node 走 agents 路由时，**检测 `skills[].type === "custom"` → 501**
-- SDK Client 区分 501 / 200-empty / 404（参考 `runtime-capabilities.md` §4）
+- `attach_skill` 在 Node 走 agents 路由时，**检测 `skills[].type === "custom"` → 501**（✅ 已落为 F7；SDK 区分 501/200-empty/404 已落为 F8）
 
 ---
 

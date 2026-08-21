@@ -58,7 +58,7 @@ import { generateEventId } from "@open-managed-agents/shared";
 import { DefaultHarness } from "@open-managed-agents/agent/harness/default-loop";
 import { buildTools } from "@open-managed-agents/agent/harness/tools";
 import { createNodeMcpFetch } from "./lib/node-mcp-fetch.js";
-import { InMemoryKvStore } from "@open-managed-agents/kv-store/adapters/in-memory";
+
 import { createNodeSkillRpc, mintSkillConfirmation } from "./lib/node-skill-rpc.js";
 import { resolveModel } from "@open-managed-agents/agent/harness/provider";
 import { composeSystemPrompt } from "@open-managed-agents/agent/harness/platform-guidance";
@@ -444,11 +444,14 @@ const sandboxOrchestrator = new DefaultSandboxOrchestrator({
   backups: workspaceBackups,
 });
 
-const nodeKvStore = new InMemoryKvStore();
+// Skill KV — SqlKvStore so installs survive process restarts (the old
+// InMemoryKvStore lost every skill:/skillver: entry on redeploy). The
+// same instance backs the route services below.
+const kv = new SqlKvStore({ db: drizzleDb, tenantId: "default" });
 const nodeSkillRpc = createNodeSkillRpc({
   agents: agentsService,
   filesBlob,
-  kv: nodeKvStore,
+  kv,
   adminAllowlist: process.env.OMA_SKILL_ADMIN_ALLOWLIST,
   requireVerified: process.env.OMA_SKILL_REQUIRE_VERIFIED,
 });
@@ -569,6 +572,8 @@ const sessionRegistry = new SessionRegistry({
   agentsService,
   memoryService,
   sandboxOrchestrator,
+  skillKv: kv,
+  skillBlobs: filesBlob,
   newEventLog,
   buildSandbox,
   sandboxWorkdirRoot: process.env.SANDBOX_WORKDIR ?? "./data/sandboxes",
@@ -629,10 +634,11 @@ const sessionRegistry = new SessionRegistry({
     // FeishuApiClient — see lib/feishu-agent-tools.ts.
     const feishuTools = await resolveFeishuAgentTools(input.sessionId);
     // Task 2 (§3.8): reminders are the snapshot SessionRegistry.build()
-    // froze from the exact mount list it provisioned — never re-read per
-    // turn, so the prompt can't drift from the actual mounts (late
-    // bindings are rejected with 409 by the binding routes).
-    const reminders = input.memoryReminders;
+    // froze — skill reminders first (CF session-do order), then memory
+    // reminders from the exact mount list it provisioned. Never re-read
+    // per turn, so the prompt can't drift from what was provisioned
+    // (late bindings are rejected with 409 by the binding routes).
+    const reminders = input.platformReminders;
     return {
       agent: input.agent,
       userMessage: input.userMessage,
@@ -657,8 +663,6 @@ const sessionRegistry = new SessionRegistry({
 await sessionRegistry.bootstrap();
 
 // ─── Services bundle ────────────────────────────────────────────────────
-
-const kv = new SqlKvStore({ db: drizzleDb, tenantId: "default" });
 
 const services: RouteServices = {
   sql,
@@ -1059,10 +1063,10 @@ const nodeNotImplemented = (c: { json: (body: unknown, status: number) => Respon
 v1.get("/runtimes", nodeNotImplemented);
 v1.get("/skills", async (c) => {
   const tenantId = c.get("tenant_id") || "default";
-  const list = await nodeKvStore.list({ prefix: `t:${tenantId}:skill:` });
+  const list = await kv.list({ prefix: `t:${tenantId}:skill:` });
   const items = [];
   for (const k of list.keys) {
-    const raw = await nodeKvStore.get(k.name);
+    const raw = await kv.get(k.name);
     if (raw) {
       try {
         items.push(JSON.parse(raw));
@@ -1098,7 +1102,7 @@ v1.post("/skills/confirmation", async (c) => {
     );
   }
   const res = await mintSkillConfirmation({
-    kv: nodeKvStore,
+    kv,
     tenantId,
     purpose: body.purpose,
     binding: {

@@ -100,6 +100,10 @@ function makeRegistry(opts: { failFirstNProvisions?: number } = {}) {
         provisioned.set(o.sessionId, o.memoryMounts);
       },
     } as never,
+    // Stub agents carry no skills — the skill read-path never runs; these
+    // only satisfy the deps contract.
+    skillKv: { get: async () => null },
+    skillBlobs: undefined,
     newEventLog: (() => ({})) as never,
     buildSandbox: async () => ({}) as never,
     sandboxWorkdirRoot: "/tmp/oma-lock-test",

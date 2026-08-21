@@ -48,6 +48,11 @@ import {
   remindersFromMounts,
   type MemoryReminder,
 } from "./lib/memory-reminders.js";
+import {
+  resolveSessionSkills,
+  type SkillBucketLike,
+  type SkillKvLike,
+} from "./lib/skill-session.js";
 
 const log = getLogger("session-registry");
 
@@ -98,10 +103,11 @@ export interface SessionRegistryDeps {
     sessionId: string;
     tenantId: string;
     eventLog: SqlEventLog;
-    /** Memory reminders frozen at build() time — derived from the exact
+    /** Platform reminders frozen at build() time — skill reminders first
+     *  (CF session-do order), then memory reminders derived from the exact
      *  mount list this machine provisioned (no per-turn re-read: bindings
      *  added after build are rejected with 409 by the binding routes). */
-    memoryReminders: MemoryReminder[];
+    platformReminders: MemoryReminder[];
     sessionThreadId?: string;
   }): Promise<unknown>;
 
@@ -113,6 +119,12 @@ export interface SessionRegistryDeps {
    *  so its appendChunk picks the right JSON-array append (json_insert
    *  on sqlite, jsonb concat on postgres). */
   sqlDialect?: "sqlite" | "postgres";
+
+  /** Skill read-path stores — the same KV + blob store install_skill
+   *  writes to, so a session's reminders describe exactly what a prior
+   *  install persisted (SqlKvStore ⇒ survives restarts). */
+  skillKv: SkillKvLike;
+  skillBlobs: SkillBucketLike | undefined;
 }
 
 interface SessionEntry {
@@ -399,7 +411,7 @@ export class SessionRegistry {
       sessionId: opts.sessionId,
       tenantId: opts.tenantId,
       eventLog: entry.eventLog,
-      memoryReminders: [],
+      platformReminders: [],
       sessionThreadId: threadId,
     });
     await this.deps.buildHarness().run(context);
@@ -588,6 +600,66 @@ export class SessionRegistry {
       backup: { restoreOnWarm: true },
     });
 
+    // Skill read-path (CF session-do.ts:4417-4489 parity): resolve the
+    // frozen agent's skills into prompt reminders + sandbox file mounts.
+    // Computed once here and frozen into the machine below — attach_skill
+    // requires a new session, so this snapshot can never drift from the
+    // agent config the session runs. Best-effort: on failure the session
+    // still builds with memory-only reminders (mirrors CF's per-block
+    // try/catch).
+    const skillsAgent =
+      frozenPrimaryAgent ??
+      (sessionRow.agent_id
+        ? await this.deps.agentsService.get({ tenantId, agentId: sessionRow.agent_id })
+        : null);
+    const skillConfigs = (skillsAgent?.skills ?? []) as Array<{
+      skill_id: string;
+      type?: string;
+      version?: string;
+    }>;
+    const skillReminders: MemoryReminder[] = [];
+    if (skillConfigs.length) {
+      try {
+        const skillSession = await resolveSessionSkills({
+          skillConfigs,
+          kv: this.deps.skillKv,
+          blobs: this.deps.skillBlobs,
+          tenantId,
+        });
+        for (const mount of skillSession.mounts) {
+          for (const file of mount.files) {
+            try {
+              if (sandbox.writeFileBytes) {
+                await sandbox.writeFileBytes(`${mount.dir}/${file.filename}`, file.bytes);
+              }
+            } catch (err) {
+              log.warn(
+                {
+                  op: "session_registry.skill_file.write",
+                  session_id: sessionId,
+                  skill: mount.skillName,
+                  filename: file.filename,
+                  err,
+                },
+                "skill file write failed; skipping",
+              );
+            }
+          }
+        }
+        skillReminders.push(...skillSession.reminders);
+      } catch (err) {
+        log.warn(
+          {
+            op: "session_registry.skills.resolve",
+            session_id: sessionId,
+            agent_id: sessionRow.agent_id,
+            err,
+          },
+          "skill resolve failed; skipping skill reminders",
+        );
+      }
+    }
+
     const eventLog = this.deps.newEventLog(sessionId);
     const streams = new SqlStreamRepo(this.deps.sql, sessionId, this.deps.sqlDialect ?? "sqlite");
 
@@ -643,7 +715,7 @@ export class SessionRegistry {
           sessionId,
           tenantId,
           eventLog,
-          memoryReminders,
+          platformReminders: [...skillReminders, ...memoryReminders],
         }),
       publish: (event: SessionEvent) => this.deps.hub.publish(sessionId, event),
     });

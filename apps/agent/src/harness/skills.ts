@@ -17,6 +17,32 @@ export interface SkillFilesResult {
   files: SkillFile[];
 }
 
+// Structural ports so both runtimes can call these resolvers without
+// Cloudflare ambient types: CF passes KVNamespace / R2Bucket (structurally
+// compatible — KVNamespace.get(key) returns Promise<string|null>, R2ObjectBody
+// carries text()/arrayBuffer()), Node passes its KvStore / BlobStore adapters.
+export interface SkillKvLike {
+  get(key: string): Promise<string | null>;
+}
+
+export interface SkillBucketBodyLike {
+  text(): Promise<string>;
+  arrayBuffer(): Promise<ArrayBuffer>;
+}
+
+export interface SkillBucketLike {
+  get(key: string): Promise<SkillBucketBodyLike | null>;
+}
+
+export interface ResolveCustomSkillsOptions {
+  /** Sandbox-visible directory skills are mounted at. Only used in the
+   *  metadata-fallback reminder text when the SKILL.md body can't be
+   *  inlined. CF microVM: "/home/user/.skills" (default). Node
+   *  local-subprocess: workdir-relative ".skills" — /home/user would
+   *  escape the workdir jail on the host FS. */
+  skillsDirBase?: string;
+}
+
 import { skillFileR2Key } from "@open-managed-agents/shared";
 
 const skillRegistry = new Map<string, Skill>();
@@ -45,9 +71,10 @@ export function resolveSkills(skillConfigs: Array<{ skill_id: string }>): Skill[
  */
 export async function resolveCustomSkills(
   skillConfigs: Array<{ skill_id: string; type?: string; version?: string }>,
-  kv: KVNamespace,
-  filesBucket: R2Bucket | undefined,
+  kv: SkillKvLike,
+  filesBucket: SkillBucketLike | undefined,
   tenantId: string,
+  opts?: ResolveCustomSkillsOptions,
 ): Promise<Skill[]> {
   const customConfigs = skillConfigs.filter(
     s => s.type === "custom" && !skillRegistry.has(s.skill_id),
@@ -98,7 +125,7 @@ export async function resolveCustomSkills(
 
       const addition = body
         ? `<skill name="${name}">\n${body}\n</skill>`
-        : `[Skill: ${name}] ${description}. Read /home/user/.skills/${name}/SKILL.md for instructions.`;
+        : `[Skill: ${name}] ${description}. Read ${opts?.skillsDirBase ?? "/home/user/.skills"}/${name}/SKILL.md for instructions.`;
 
       skills.push({
         id: cfg.skill_id,
@@ -124,8 +151,8 @@ export async function resolveCustomSkills(
  */
 export async function getSkillFiles(
   skillConfigs: Array<{ skill_id: string; type?: string; version?: string }>,
-  kv: KVNamespace,
-  filesBucket: R2Bucket | undefined,
+  kv: SkillKvLike,
+  filesBucket: SkillBucketLike | undefined,
   tenantId: string,
 ): Promise<SkillFilesResult[]> {
   if (!filesBucket) return [];
