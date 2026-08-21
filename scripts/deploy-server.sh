@@ -8,7 +8,7 @@ set -euo pipefail
 SERVER_HOST="${SERVER_HOST:-117.72.219.106}"
 SERVER_USER="${SERVER_USER:-root}"
 TARGET_DIR="${TARGET_DIR:-/opt/openma}"
-SSH_OPTS="-o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15"
+SSH_OPTS="-o BatchMode=yes -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=60 -o TCPKeepAlive=yes"
 ALLOW_DIRTY="${ALLOW_DIRTY:-0}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -70,8 +70,8 @@ ssh ${SSH_OPTS} "${SERVER_USER}@${SERVER_HOST}" "
   mkdir -p data/sandboxes data/memory-blobs data/session-outputs data/oma-vault-ca
   chown -R 1000:1000 data
   chmod -R 775 data
-  echo 'Starting Docker Compose with PostgreSQL backend...'
-  docker compose -f docker-compose.postgres.yml up --build -d --remove-orphans
+  echo 'Starting Docker Compose with PostgreSQL backend (oma-server + oma-vault)...'
+  docker compose -f docker-compose.postgres.yml up --build -d --remove-orphans oma-server oma-vault
 "
 
 echo "🩺 [4/4] Polling container health (http://${SERVER_HOST}:8787/health)..."
