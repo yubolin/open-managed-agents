@@ -1,193 +1,150 @@
 # Harness 运行时上下文稳定性与大结果治理 — SDS
 
-> 状态：**v0.2（Revised Draft / 架构与语义规范）**
-> 目标：解决超长对话上下文膨胀、中文 Token 严重低估、MCP 大结果无节制侵占上下文、模型超限崩溃与报错掩盖问题。
+> 状态：**v0.3（Revised Draft / 架构分层与模型视图规范）**
+> 目标：确立“保留历史事实、替换模型视图”的上下文管理架构，解决超长对话上下文膨胀、中文 Token 估算失真、MCP 大结果无节制侵入模型上下文、以及超限崩溃问题。
 > 适用运行时：Cloudflare Workers (CF) 与 Node.js self-host (main-node) 双运行时一致对齐。
 
 ---
 
-## 1. 问题背景与事实核查
+## 1. 核心架构哲学：保留历史事实，替换模型视图
 
-### 1.1 生产复现事实（2026-08-22 实测回溯）
-在真实生产会话中，Agent 读取飞书等外部 MCP 服务时，单次 `agent.mcp_tool_result` 携带了长达 **369,684 字符**、**148,370 字符**、**112,193 字符** 的原始文档全文。
-这些大文本直接保留在会话中，导致：
-1. **模型输入 Tokens 迅速膨胀至 228,198 tokens**，首 token 延迟达到 20.9s，单轮耗时超 70s；
-2. **压缩机制（Compaction）零触发**（数据库记录 `compaction_events = 0`）；
-3. **供应商报错崩溃**：MiniMax 返回 HTTP 400 `invalid params, context window exceeds limit (2013)`；
-4. **前端错误被掩蔽**：UI 显示通用 `harness_turn_failed`，真实供应商错误码被隐藏。
-
-### 1.2 根因定位与事实校准
-
-| # | 缺陷模块 | 源码位置 | 根因描述与校准 |
-|---|---|---|---|
-| 1 | **Token 估算器** | `apps/agent/src/harness/compaction.ts:80`<br>`apps/agent/src/harness/default-loop.ts:921` | 硬编码 `Math.ceil(s.length / 4)`。中文文本（1 汉字通常占用 0.6–1.5 tokens）被低估 2~3 倍；且 `charCodeAt` 遇到 Emoji 等双字节代理对会重复统计。 |
-| 2 | **模型窗口大小写与规格校准** | `apps/agent/src/harness/default-loop.ts:941` | `id.includes("MiniMax")` 区分大小写，`minimax-m2.7` 匹配失败回落为 200K。官方真实规格：MiniMax M2.7 窗口上限为 **204,800 tokens**；Claude 3.5 Sonnet 为 **200,000 tokens**，仅 Claude 4.6+ 为 1M。 |
-| 3 | **大结果未做投影分层** | `apps/agent/src/harness/tools.ts:1308-1411` | 现有 `web_fetch` 具备 `>5KB` 写入 `/workspace/.web/<sha>.md` 并进行摘要外置，但通用 MCP 缺少大结果拦截与外置投影机制。 |
-| 4 | **缺乏超限应急滑窗重试** | `apps/agent/src/harness/default-loop.ts` | 模型调用前无 Hard Guard，模型返回 400（Context Limit Exceeded）后直接抛出异常导致会话报废。 |
-| 5 | **错误详情丢失与事件时序** | `apps/main-node/src/lib/node-session-router.ts:99` | 捕获底层错误时仅上报固定字面量 `harness_turn_failed`，且 `session.error` 先于 `span.model_request_end` 落库导致前端投影错位。 |
-
----
-
-## 2. 核心架构决策：持久事件原文 vs 模型上下文投影
-
-OpenMA 平台的核心不变量是：**事件日志（Event Log）是不可变的审计账本，而模型上下文（Model Context）是按需生成的动态投影视图**。
+借鉴现代大模型长周期 Agent 架构（如 Codex / Responses API `context_management` 与 loss-aware compaction）：
+**上下文治理的核心绝非“超限后粗暴删除旧消息（Truncation）”，而是通过严格的分层机制，在保证审计事实完整性的同时，动态生成精炼的模型上下文视图。**
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│ 1. 持久事件原文层 (Persistent Event Log Layer - Immutable SQLite/PG)         │
+│ 1. 不可变事件日志层 (Append-only Event Log - SQLite / Postgres)              │
 │                                                                             │
-│  [Event 250] user.message ("读取文档")                                       │
-│  [Event 251] agent.mcp_tool_use ("docx_rawContent")                          │
-│  [Event 252] agent.mcp_tool_result (完整原始 369,684 字符，落库保真审计)       │
-└──────────────────────────────────────┬──────────────────────────────────────┘
-                                       │ eventsToMessages(events) 动态投影
-                                       ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│ 2. 模型上下文投影层 (Model Context Projection Layer - Ephemeral / Compacted)│
-│                                                                             │
-│  • CJK-Aware Token Estimator 准确评估总 Tokens                               │
-│  • Result Size Guard 拦截超大结果（>15KB）：                                │
-│    - 沙箱落盘：/workspace/.mcp/<call_id>.txt                                │
-│    - 投影上下文：前 3,000 字符预览 + read 工具按行分页读取指引               │
-│  • Compaction Trigger：总 Tokens > 0.75 * Window 时自动触发 CC Summarize     │
+│  [Event 1] user.message ("任务初始目标与核心约束...")                          │
+│  [Event 2] agent.tool_use ("wiki_search")                                   │
+│  [Event 3] agent.mcp_tool_result {                                          │
+│              blob_ref: "blob_feishu_369k_sha256", // 持久 Blob 存储          │
+│              byte_length: 369684,                                           │
+│              preview: "..."                                                 │
+│            }                                                                │
+│  [Event 4] session.compaction_boundary (压缩检查点事件，记录状态摘要与 tail 范围)│
+│  ...                                                                        │
 └──────────────────────────────────────┬──────────────────────────────────────┘
                                        │
-                                       ▼ 发起 LLM 推理
+                                       │ 动态上下文投影 (Context Projection)
+                                       ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ 2. 模型上下文投影层 (Model Context Projection - 动态生成，零破坏性改写)       │
+│                                                                             │
+│  ┌───────────────────────────────────────────────────────────────────────┐  │
+│  │ 1. 用户原始目标与全局约束 (User Goals & System Constraints)            │  │
+│  ├───────────────────────────────────────────────────────────────────────┤  │
+│  │ 2. 状态压缩检查点 (Compaction Checkpoint / State Summary)              │  │
+│  │    • 已完成操作与阶段性结论                                            │  │
+│  │    • 关键工具调用与外部系统状态                                        │  │
+│  │    • 待解决问题与当前执行计划                                          │  │
+│  ├───────────────────────────────────────────────────────────────────────┤  │
+│  │ 3. 最近若干轮原文 (Preserved Verbatim Tail)                           │  │
+│  │    • 最近 N 条消息的原汁原味上下文 (保持连贯推理能力)                  │  │
+│  ├───────────────────────────────────────────────────────────────────────┤  │
+│  │ 4. 当前轮 MCP 大结果投影 (MCP Big Result Guard)                        │  │
+│  │    • 结构化预览 (前 3,000 字符) + 沙箱持久化路径 (/workspace/.mcp/...) │  │
+│  │    • 引导 Agent 使用 read(offset, limit) 按需分段读取                  │  │
+│  └───────────────────────────────────────────────────────────────────────┘  │
+└──────────────────────────────────────┬──────────────────────────────────────┘
+                                       │
+                                       ▼ Pre-flight 安全检查 (Token 估算 >= compact_threshold)
+                     ┌─────────────────┴─────────────────┐
+                     ▼                                   ▼
+          达到阈值: 触发模型执行压缩           未达阈值: 直接发起 Agent 推理
+         (POST /responses/compact 语义)                  │
+                     │                                   │
+                     └─────────────────┬─────────────────┘
+                                       │
+                                       ▼
                               ┌────────────────┐
                               │ Provider Call  │
                               └───────┬────────┘
                     ┌─────────────────┴─────────────────┐
                     ▼                                   ▼
-                 Success                         400 Context Limit
+                 Success                         400 Context Limit (最后保险)
                                                         │
                                                         ▼
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│ 3. 应急降级与重试语义 (Emergency Sliding Projection & Event Semantics)       │
+│ 3. 400 超限作为最后防线 (Emergency Re-compaction & Single Retry)            │
 │                                                                             │
-│  a. 记录失败 Span：span.model_request_end { is_error: true, status: 400 }   │
-│  b. 不修改历史事件，向当前投影应用 Emergency Sliding Window：                │
-│     将非最新一轮历史 Tool Result 折叠为简短占位摘要                           │
-│  c. 发起第二次模型重试（Retry Once）                                         │
-│  d. 成功 → 继续正常 Agent Loop；失败 → 记录带完整 detail 的 session.error     │
+│  • 记录异常 Span：span.model_request_end { is_error: true, status: 400 }   │
+│  • 绝不修改或删除已持久化的历史事件；                                       │
+│  • 在投影层强制收敛 Tail 窗口并执行即时压缩重投影；                         │
+│  • 生成新的 attempt 重试一次；若依然失败则记录完整错误并优雅进入 idle。      │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## 3. 详细技术规范
+## 2. 关键机制与分层规范
 
-### 3.1 CJK 感知的 Unicode Code Point Token 估算器
+### 2.1 大结果治理在首入时拦截（Big Result Ingestion Guard）
+**核心原则：Compaction 不能代替大结果治理；30 万字符的原始结果必须在首次进入模型上下文前就被拦截分流。**
 
-使用 `for (const char of text)` 按 Unicode Code Point 迭代（避免代理对计算两次）：
+1. **持久化与引用化（Ingestion Phase）**：
+   - 当 MCP 工具（如 `docx_v1_document_rawContent`）返回内容超过阈值（`MAX_INLINE_RESULT_BYTES = 15KB`）：
+   - 完整内容由底层 Blob 存储或沙箱持久化落盘：`/workspace/.mcp/<tool_name>_<call_id>.txt`（或持久 BlobStore）；
+   - DB 中的 `agent.mcp_tool_result` 记录结构化结果，附带 `blob_ref`、`byte_length`、`sha256` 以及正文头部摘要。
+2. **上下文投影（Projection Phase）**：
+   - 投射到发往 LLM 的 `messages` 中的并非 36 万字符全文，而是标准化的结构化代理卡片：
+     ```markdown
+     [Tool Result: 369,684 chars - Stored to disk: /workspace/.mcp/feishu_docx_call123.txt]
 
-```typescript
-/**
- * CJK 感知的轻量 Token 估算器（基于 Unicode Code Point）
- * - ASCII / 英文 / 数字 / 标点 (codePoint <= 127): 约 0.25 tokens / char
- * - CJK 表意字符 / 假名 / 谚文 / 全角标点: 约 1.25 tokens / char
- * - 复杂 Emoji / 补充平面符号 (codePoint > 0xFFFF): 约 2.0 tokens / char
- * - 其他多字节 Unicode: 约 1.5 tokens / char
- */
-export function estimateTextTokens(text: string): number {
-  if (!text) return 0;
-  let asciiCount = 0;
-  let cjkCount = 0;
-  let emojiCount = 0;
-  let otherCount = 0;
+     --- Content Preview (First 3,000 characters) ---
+     <正文前 3000 字符>
 
-  for (const char of text) {
-    const cp = char.codePointAt(0)!;
-    if (cp <= 0x7F) {
-      asciiCount++;
-    } else if (
-      (cp >= 0x4E00 && cp <= 0x9FFF) ||   // CJK Unified Ideographs
-      (cp >= 0x3400 && cp <= 0x4DBF) ||   // CJK Extension A
-      (cp >= 0x20000 && cp <= 0x2A6DF) || // CJK Extension B
-      (cp >= 0x3000 && cp <= 0x303F) ||   // CJK Symbols & Punctuation
-      (cp >= 0xFF00 && cp <= 0xFFEF) ||   // Halfwidth & Fullwidth Forms
-      (cp >= 0x3040 && cp <= 0x309F) ||   // Hiragana
-      (cp >= 0x30A0 && cp <= 0x30FF) ||   // Katakana
-      (cp >= 0xAC00 && cp <= 0xD7AF)      // Hangul Syllables
-    ) {
-      cjkCount++;
-    } else if (cp > 0xFFFF) {
-      emojiCount++;
-    } else {
-      otherCount++;
-    }
-  }
-
-  return Math.ceil(asciiCount * 0.25 + cjkCount * 1.25 + emojiCount * 2.0 + otherCount * 1.5);
-}
-```
-
-### 3.2 模型上下文窗口映射表（精确规格校准）
-
-```typescript
-/**
- * 精确映射各大模型的官方上下文窗口规格（Tokens）。
- * 优先级：ModelCard.context_window_tokens 显式配置 > 官方模型 ID 精确匹配 > 保底 128,000。
- */
-export function resolveContextWindowTokens(model: LanguageModel | string, overrideLimit?: number): number {
-  if (typeof overrideLimit === "number" && overrideLimit > 0) {
-    return overrideLimit;
-  }
-  const rawId = (model as any)?.modelId ?? (typeof model === "string" ? model : "");
-  const id = String(rawId).toLowerCase();
-
-  // MiniMax 官方规格
-  if (id.includes("minimax-m2.7") || id.includes("minimax-m2.5") || id.includes("minimax")) return 204_800;
-
-  // Anthropic 官方规格（严谨区分版本）
-  if (id.includes("claude-sonnet-4-6") || id.includes("claude-opus-4-6") || id.includes("claude-opus-4-7")) return 1_000_000;
-  if (id.includes("claude-3-5-sonnet") || id.includes("claude-3-7-sonnet") || id.includes("claude-3-5-haiku")) return 200_000;
-  if (id.includes("claude-3-opus") || id.includes("claude-3-sonnet") || id.includes("claude-3-haiku")) return 200_000;
-
-  // OpenAI / DeepSeek / Qwen
-  if (id.includes("gpt-4o") || id.includes("gpt-4.5") || id.includes("o1") || id.includes("o3")) return 128_000;
-  if (id.includes("deepseek-v3") || id.includes("deepseek-r1")) return 128_000;
-  if (id.includes("qwen-2.5") || id.includes("qwen-max")) return 128_000;
-
-  return 128_000; // 安全兜底
-}
-```
-
-### 3.3 MCP 大结果沙箱外置与动态投影策略
-
-- **持久层**：`agent.mcp_tool_result` 保持完整原文记录在 DB（保证回溯与审计）；
-- **投影层（`eventsToMessages`）**：
-  - 当单个 Tool Result 长度超过 `MAX_INLINE_MCP_RESULT_BYTES = 15,360`（15KB）：
-  - 自动向沙箱写入 `/workspace/.mcp/<tool_name>_<call_id>.txt`；
-  - 投射到 LLM 上下文的内容为：
-    ```markdown
-    [Tool Result Exceeded 15KB - Saved to sandbox disk: /workspace/.mcp/feishu_kb_docx_rawContent_call123.txt]
-    
-    --- Preview (First 3,000 characters) ---
-    <正文前 3000 字符>
-    
-    --- Guidance ---
-    The document is 369,684 characters long. If you need specific sections, use the `read` tool with `offset` and `limit` to inspect specific lines of the file.
-    ```
-
-### 3.4 应急重试的事件语义与时序修复
-
-1. **时序与错误结构规范**：
-   - 抛出异常时，先写入 `span.model_request_end`（携带 `provider_status: 400`, `error_message: "invalid params, context window exceeds limit (2013)"`）；
-   - 随后写入 `session.error`，其 `message` 与 `details` 包含结构化字段，彻底终结掩蔽现象。
-2. **应急滑窗重试（1 次）**：
-   - 触发 400 时向日志记录 `span.model_retry`；
-   - 将除最近一轮之外的所有历史 `tool_result` 内容动态替换为 `[Tool result folded to recover context window]`；
-   - 重新估算并重试一次模型调用。
+     --- Usage Instructions ---
+     The full document is available on disk. Use the `read` tool with line `offset` and `limit` to inspect specific sections as needed.
+     ```
 
 ---
 
-## 4. 验收准则与 TDD 标定
+### 2.2 提前触发的主动模型压缩（Loss-aware Compaction）
+**核心原则：在逼近窗口前主动由模型生成压缩检查点，而非被动等待 400 报错。**
 
-1. **Token 估算器标定测试**：
-   - 构造包含 10,000 个汉字 + 标点的固定语料，断言估算值落在 MiniMax / Claude 实际 API 返回 `model_usage.input_tokens` 的 **±15% 误差区间内**；
-   - 构造包含 10,000 个 ASCII 字符的固定语料，断言估算值落在 `2,300 ~ 2,700` tokens 范围内；
-   - 构造包含 500 个复杂 Emoji（如 👨‍👩‍👧‍👦、🎯）的语料，断言估算值正常且不抛出范围异常。
-2. **大结果投影测试**：
-   - DB 存入 300KB 的 `agent.mcp_tool_result`，断言 `eventsToMessages()` 产生的 `ModelMessage` 文本长度不超过 3,500 字符，且沙箱对应路径存在该完整文件。
-3. **上下文超限重试测试**：
-   - Mock 供应商首次返回 400 `context window exceeds limit`，断言 Harness 触发一次滑窗裁剪并在第二轮调用成功完成 turn。
+1. **Token 估算器（基于 Unicode Code Point）**：
+   - 采用 `for (const char of text)` 按 Code Point 遍历，杜绝 Emoji 等代理对重复统计；
+   - 区分 CJK 统一表意文字（~1.25 tokens/字）、ASCII/英文（~0.25 tokens/字）、复杂符号与 Emoji（~2.0 tokens/字）；
+   - 使用固定多语言测试集，与真实模型 API usage 进行误差标定（保持在 ±15% 以内）。
+2. **触发时机（Pre-flight Check）**：
+   - 每次模型请求前计算当前投影上下文预估 Tokens；
+   - 结合模型实际配置的 `context_window_tokens`（例如 MiniMax M2.7 为 `204,800`，Claude 3.5 为 `200,000`，Claude 4.6 为 `1,000,000`，支持 ModelCard 覆盖）；
+   - 当达到安全余量阈值（如 `compact_threshold = 0.70 ~ 0.75 * context_window`）时，**在发起正常 Agent 推理前，先发起一次模型压缩调用**。
+3. **压缩检查点内容（Compaction Checkpoint）**：
+   - 压缩调用聚焦提炼 5 大要素：
+     1. 用户核心意图、范围与未完成约束；
+     2. 已经完成的操作与确认的事实；
+     3. 关键工具调用结果与外部系统状态；
+     4. 当前阻塞点与未解决问题；
+     5. 下一步具体执行步骤。
+   - 压缩结果以 `session.compaction_boundary` 事件形式持久化追加到 Event Log 中；
+   - 后续所有模型调用自动以该压缩检查点作为历史起点，仅拼接此后的 Preserved Tail 原文。
+
+---
+
+### 2.3 400 超限作为最后防线（Last-Resort Insurance）
+若由于极端并发输入导致供应商仍然返回 400（`context window exceeds limit`）：
+1. **语义规范**：视为单次 attempt 失败，不修改任何历史已落库事件；
+2. **重试机制**：
+   - 记录 `span.model_request_end { is_error: true, status: 400 }`；
+   - 强制收紧 Preserved Tail 范围（由保留最近 5 轮收敛至仅保留最近 1 轮），并立即基于已有 Compaction 检查点生成极致紧凑视图；
+   - 发起第二次重试（Retry Once）；
+3. **终态处理**：若重试依然超限，写入包含具体错误详情的 `session.error`（带 `details: { provider_error: "..." }`），将选择权交给用户或上层系统。
+
+---
+
+## 3. 验收准则与 TDD 规范
+
+1. **大结果首入治理测试**：
+   - 模拟 MCP 工具产生 400KB 文本输出，断言：
+     - 沙箱对应路径成功生成实体文件；
+     - 投影给 LLM 的上下文消息严格控制在 4,000 字符内；
+     - Agent 能够通过 `read` 工具按需读取该文件的指定行。
+2. **主动压缩触发测试**：
+   - 构造多轮中文对话达到 `compact_threshold`，断言：
+     - 在正常推理前自动插入一次 Compaction 模型调用；
+     - Event Log 成功写入 `session.compaction_boundary`；
+     - 下一轮模型推理的输入 Tokens 相比压缩前大幅下降（>70%）。
+3. **不变性测试**：
+   - 无论发生主动压缩还是 400 应急重试，断言历史 `session_events` 表中的全部 `user.message`、`agent.tool_use`、`agent.mcp_tool_result` 记录未发生任何 UPDATE 或 DELETE 操作。
