@@ -110,15 +110,20 @@ export class NodeSessionRouter implements SessionRouter {
     err: unknown,
   ): Promise<void> {
     const message = err instanceof Error ? err.message : String(err);
+    const errObj = typeof err === "object" && err !== null ? (err as Record<string, unknown>) : null;
+    const errorCode = typeof errObj?.code === "string" ? errObj.code : code;
+    const details = errObj?.details ?? undefined;
+
     moduleLog.error(
-      { err, op: `node_session_router.${code}`, session_id: sessionId },
-      `${code} failed`,
+      { err, op: `node_session_router.${errorCode}`, session_id: sessionId, details },
+      `${errorCode} failed: ${message}`,
     );
     try {
       const errorEv = {
         type: "session.error",
-        error: code,
+        error: errorCode,
         message,
+        ...(details ? { details } : {}),
       } as SessionEvent;
       await log.appendAsync(errorEv);
       const stored = await log.getEventsAsync();

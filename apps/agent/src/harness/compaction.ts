@@ -73,27 +73,12 @@ export interface CompactionResult {
   compacted_message_count: number;
 }
 
-// ---------- token estimation ----------
-// Cheap 4-chars-per-token heuristic; good enough for compaction triggers.
-function estimateMessageTokens(m: ModelMessage): number {
-  const s = typeof m.content === "string" ? m.content : JSON.stringify(m.content);
-  return Math.ceil(s.length / 4);
-}
-function estimateMessagesTokens(messages: ModelMessage[]): number {
-  let total = 0;
-  for (const m of messages) total += estimateMessageTokens(m);
-  return total;
-}
+import { estimateMessagesTokens } from "./token-estimator";
 
 // Trigger fraction: shouldCompact fires when estimated tokens exceed
-// `triggerFraction * contextWindowTokens`. We pick 0.75 to give headroom
-// for long single turns to flush tool results before the trigger.
-//
-// Tail preservation lives entirely in derive (history.ts) — it walks
-// pre-boundary events using the same per-message estimate and renders the
-// last K messages verbatim alongside the summary. Strategy doesn't need to
-// coordinate; it just produces the summary covering everything.
-const TRIGGER_FRACTION = 0.75;
+// `triggerFraction * contextWindowTokens`. We pick 0.70 to ensure compaction
+// fires proactively before hitting provider 400 boundaries.
+const TRIGGER_FRACTION = 0.70;
 
 // ============================================================
 // SummarizeCompactionStrategy

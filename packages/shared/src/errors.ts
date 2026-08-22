@@ -57,6 +57,17 @@ export class BillingError extends OmaError {}
 /** 401 / 403 from a model provider or downstream auth gate. */
 export class AuthError extends OmaError {}
 
+/** Model context limit reached (e.g. 400 / 2013 / context_length_exceeded / prompt too long). */
+export class ContextOverflowError extends OmaError {
+  readonly code: string = "provider_context_window_exceeded";
+  readonly details?: Record<string, unknown>;
+  constructor(message: string, opts?: { cause?: unknown; details?: Record<string, unknown>; code?: string }) {
+    super(message, opts);
+    if (opts?.code) this.code = opts.code;
+    if (opts?.details) this.details = opts.details;
+  }
+}
+
 /**
  * Heuristic mapper: native/external error → typed OmaError.
  *
@@ -71,6 +82,15 @@ export class AuthError extends OmaError {}
 export function classifyExternalError(err: unknown): OmaError | unknown {
   if (err instanceof OmaError) return err;
   const msg = err instanceof Error ? err.message : String(err);
+
+  // Context window limits
+  if (
+    /context window exceeds limit|context_length_exceeded|prompt is too long|prompt exceeds maximum context length|exceeds the context window|maximum context length|2013/i.test(
+      msg,
+    )
+  ) {
+    return new ContextOverflowError(msg, { cause: err });
+  }
 
   // CF Containers — the motivating case. "version rollout" is the exact
   // string CF emits when a wrangler deploy kills a container mid-turn;

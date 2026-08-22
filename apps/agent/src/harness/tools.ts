@@ -11,6 +11,7 @@ import { nanoid } from "nanoid";
 // Concrete adapters (CF / Node / CDP / Disabled) live in the package and
 // dynamic-import their workerd / Node peers only at first launch().
 import type { BrowserHarness, BrowserBillingHook } from "@open-managed-agents/browser-harness";
+import { materializeToolResultToWorkspace, MAX_INLINE_RESULT_CHARS } from "./large-tool-result-guard";
 
 // Source of truth for which tool names are part of the agent_toolset_20260401
 // built-in suite. Used by buildTools() below to decide which tool entries to
@@ -1393,7 +1394,24 @@ export async function buildTools(
             timeoutPromise,
           ]);
           for (const [toolName, t] of Object.entries(remoteTools)) {
-            tools[`mcp__${server.name}__${toolName}`] = t;
+            const fullToolName = `mcp__${server.name}__${toolName}`;
+            const originalExec = (t as any)?.execute;
+            if (originalExec && typeof originalExec === "function") {
+              tools[fullToolName] = {
+                ...t,
+                execute: async (args: any, context: any) => {
+                  const result = await originalExec(args, context);
+                  const rawText = typeof result === "string" ? result : JSON.stringify(result ?? "");
+                  if (rawText.length > MAX_INLINE_RESULT_CHARS && sandbox) {
+                    const toolCallId = context?.toolCallId ?? `call_${Date.now()}`;
+                    void materializeToolResultToWorkspace(sandbox, toolCallId, rawText);
+                  }
+                  return result;
+                },
+              };
+            } else {
+              tools[fullToolName] = t;
+            }
           }
         } catch (err) {
           // Connection / handshake / tools/list failure for one server

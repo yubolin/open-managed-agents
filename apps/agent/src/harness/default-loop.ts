@@ -2,12 +2,18 @@ import { streamText, stepCountIs, wrapLanguageModel } from "ai";
 import type { ContentPart, ModelMessage, LanguageModel, SystemModelMessage } from "ai";
 import type { HarnessInterface, HarnessContext, HarnessRuntime, FileResolver } from "./interface";
 import type { SessionEvent, ContentBlock, AgentToolUseEvent } from "@open-managed-agents/shared";
-import { generateEventId, classifyExternalError, ModelError } from "@open-managed-agents/shared";
+import { generateEventId, classifyExternalError, ModelError, ContextOverflowError } from "@open-managed-agents/shared";
 import { eventsToMessagesAsync } from "../runtime/history";
 import { SummarizeCompactionStrategy, resolveCompactionStrategy } from "./compaction";
 import type { CompactionStrategy } from "./compaction";
 import { ALL_TOOLS } from "./tools";
 import { llmLoggingMiddleware, llmLogKey } from "./llm-logging-middleware";
+import { resolveContextWindowTokens, computeUsableInputTokens } from "./context-window";
+import {
+  estimateFullContextTokens,
+  estimateMessagesTokens,
+  estimateMessageTokens,
+} from "./token-estimator";
 
 // Single source of truth lives in ./tools.ts (ALL_TOOLS). Importing here so
 // adding a new toolset entry can't drift the event-classification list — the
@@ -22,6 +28,49 @@ const isMcpTool = (name: string) => name.startsWith("mcp_");
 // filters, billing dashboards) split on those event types.
 export const isBuiltinTool = (name: string): boolean =>
   BUILTIN_TOOLS.has(name) || isMcpTool(name) || name.startsWith("call_agent_");
+
+export interface ContextOverflowDiagnostic {
+  isOverflow: boolean;
+  statusCode?: number;
+  providerCode?: number | string;
+  providerMessage?: string;
+}
+
+/**
+ * Identify provider-side context window / token overflow errors across providers.
+ */
+export function detectContextOverflowError(error: unknown): ContextOverflowDiagnostic {
+  if (!error) return { isOverflow: false };
+  const message = error instanceof Error ? error.message : String(error);
+  let statusCode: number | undefined;
+  let responseBody = "";
+  if (typeof error === "object" && error !== null) {
+    const e = error as { statusCode?: number; status?: number; responseBody?: string };
+    statusCode = e.statusCode ?? e.status;
+    if (typeof e.responseBody === "string") {
+      responseBody = e.responseBody;
+    }
+  }
+  const combined = `${message} ${responseBody}`.toLowerCase();
+  const isOverflow =
+    combined.includes("context window exceeds limit") ||
+    combined.includes("context_length_exceeded") ||
+    combined.includes("prompt is too long") ||
+    combined.includes("prompt exceeds maximum context length") ||
+    combined.includes("exceeds the context window") ||
+    combined.includes("maximum context length") ||
+    (statusCode === 400 && (combined.includes("2013") || combined.includes("context")));
+
+  let providerCode: number | string | undefined;
+  if (combined.includes("2013")) providerCode = 2013;
+
+  return {
+    isOverflow,
+    statusCode: statusCode ?? (combined.includes("400") ? 400 : undefined),
+    providerCode,
+    providerMessage: responseBody ? `${message}: ${responseBody}` : message,
+  };
+}
 
 
 /**
@@ -315,81 +364,74 @@ export class DefaultHarness implements HarnessInterface {
     // provider exposes its own knobs via providerOptions. We branch on
     // model.provider here. To add OpenAI/Gemini cache support later, extend
     // the strategy table below; the harness loop above doesn't change.
+    // 3. Apply provider-specific cache strategy.
     const cached = applyProviderCacheStrategy(model, systemPrompt, tools, messages);
-    const finalMessages = cached.messages;
+    let finalMessages = cached.messages;
 
-    // 4. Resolve model id (used by per-step span events emitted via the
-    //    streamText `start-step`/`finish-step` chunk + onStepFinish hooks).
-    //    The OUTER span.model_request_start/end pair around streamText() that
-    //    used to live here was removed: ai-sdk's streamText loops internally
-    //    (one call per tool round-trip), so a single outer span hid the actual
-    //    per-call timing + per-call usage that Anthropic's Managed Agents wire
-    //    spec exposes.
+    // 4. Resolve model id
     const modelId = typeof agent.model === "string" ? agent.model : agent.model.id;
 
-    // 5. Run agent loop with retry + timeout + prompt caching.
-    //
-    // Streaming mode: streamText emits text-delta chunks via onChunk as
-    // tokens arrive. We forward each delta through `runtime.broadcastChunk`
-    // (broadcast + persist to streams table; NOT to events log) so chatbot
-    // clients see live token-by-token rendering.
-    //
-    // Message boundary: one logical "message" = one step's text part.
-    // We mint a fresh `currentMessageId` lazily on first text-delta of
-    // each step, broadcast a stream_start, accumulate chunks, then on
-    // onStepFinish (which still owns the persisted `agent.message`)
-    // broadcast stream_end with the same id and finalize the stream
-    // row. The same id lands on the `agent.message` event so clients
-    // can swap chunk display for canonical content.
-      // Single-attempt model call. Retry/keepAlive/permanent-stall logic
-      // moved out to runtime/turn-runtime.ts (Primitive 1). Caller decides
-      // whether to retry on TurnAborted; default-loop just runs the model
-      // once and propagates errors. Stale-chunk detection stays here
-      // because it needs direct access to streamText's onChunk timing —
-      // turn-runtime would need a chunk-arrival callback to do it from
-      // outside, which is more plumbing for marginal gain.
-      const result = await (async () => {
+    // 5. Pre-flight token budgeting & Hard Guard check (SDS §5.5)
+    const usableInputTokens = computeUsableInputTokens(ctxWindow);
+    let estimatedTokens = estimateFullContextTokens({
+      systemPrompt: cached.system,
+      tools: cached.tools,
+      messages: finalMessages,
+    });
+
+    if (estimatedTokens > usableInputTokens) {
+      console.warn(
+        `[pre-flight] Estimated tokens (${estimatedTokens}) exceed usable budget (${usableInputTokens}). Attempting emergency compaction...`,
+      );
+      if (this.compact) {
+        try {
+          await this.compact(runtime.history.getEvents(), runtime, { model, systemPrompt, tools });
+          const refreshedEvents = runtime.history.getEvents();
+          const refreshedMessages = this.deriveModelContext
+            ? await this.deriveModelContext(refreshedEvents, { fileFetcher: ctx.fileFetcher })
+            : await eventsToMessagesAsync(refreshedEvents, ctx.fileFetcher);
+          const refreshedCached = applyProviderCacheStrategy(model, systemPrompt, tools, refreshedMessages);
+          finalMessages = refreshedCached.messages;
+          estimatedTokens = estimateFullContextTokens({
+            systemPrompt: refreshedCached.system,
+            tools: refreshedCached.tools,
+            messages: finalMessages,
+          });
+        } catch (compactErr) {
+          console.warn(`[pre-flight] Emergency compaction failed: ${(compactErr as Error).message}`);
+        }
+      }
+
+      if (estimatedTokens > usableInputTokens) {
+        const hardLimitErr = new ContextOverflowError(
+          `Context projection exceeds model budget (${estimatedTokens} > ${usableInputTokens} tokens)`,
+          {
+            code: "context_projection_exceeds_budget",
+            details: {
+              provider: modelId,
+              estimated_input_tokens: estimatedTokens,
+              context_window_tokens: ctxWindow,
+              usable_input_tokens: usableInputTokens,
+            },
+          },
+        );
+        throw hardLimitErr;
+      }
+    }
+
+    // 6. Run agent loop with retry + single attempt 400 overflow fallback
+    const runStreamAttempt = async (messagesToSend: ModelMessage[], attempt: number) => {
       let currentMessageId: string | null = null;
-      // Per-step thinking and tool-input streams keyed by the AI SDK
-      // chunk's id (reasoning) or toolCallId (tool input). Multiple
-      // can be in flight simultaneously within one step (parallel
-      // tool calls). Cleared between steps via onStepFinish, but the
-      // canonical event landing is what tells the client to swap.
       const liveThinking = new Set<string>();
       const liveToolInput = new Set<string>();
-
-      // Per-step model_request span pair. We hook ai-sdk's
-      // `experimental_onStepStart` (fires before each provider call) to mint
-      // an id + broadcast span.model_request_start, and pair via
-      // model_request_start_id from onStepFinish / onError / onAbort.
-      // The `experimental_` prefix means vercel-ai may rename / change
-      // signature without notice; pin the ai-sdk version on dep upgrade.
-      // Anthropic's Managed Agents wire spec uses one pair per actual
-      // model call (not per streamText loop), which is what this gives us.
-      //
-      // OMA extension: between start and end we also emit
-      // span.model_first_token at the first chunk of each step (any chunk
-      // type counts — text, reasoning, tool-input). Splits the bar into
-      // TTFT vs generation in the timeline. `stepSawFirstChunk` is the
-      // per-step latch; reset on each onStepStart.
       let stepStartId: string | null = null;
       let stepSawFirstChunk = false;
 
       const streamStartedAt = Date.now();
-      console.log(`[stream] streamText START model=${modelId} messages=${finalMessages.length} tools=${Object.keys(cached.tools ?? {}).length}`);
+      console.log(
+        `[stream] streamText START attempt=${attempt} model=${modelId} messages=${messagesToSend.length} tools=${Object.keys(cached.tools ?? {}).length}`,
+      );
 
-      // LLM full-body logging: wrap the model so every provider call's
-      // request + response is teed to R2 keyed by the per-step span
-      // event id. When env.llmLog is absent (test harnesses, non-CF),
-      // we skip the wrap entirely so the model object passes through.
-      // The spanIdResolver closure reads `stepStartId`, which AI SDK
-      // mints in experimental_onStepStart (called BEFORE the provider
-      // doStream call) — so the middleware always sees the right id at
-      // wrapStream invocation time.
-      // Note: wrapLanguageModel only accepts LanguageModelV3 instances
-      // (not the LanguageModel union which includes string ids). All
-      // resolveModel returns are V3 instances; cast through unknown to
-      // satisfy the wrapper's narrower type without runtime conversion.
       const llmLogCtx = ctx.env.llmLog;
       const wrappedModel: LanguageModel = llmLogCtx
         ? (wrapLanguageModel({
@@ -405,375 +447,311 @@ export class DefaultHarness implements HarnessInterface {
         : model;
 
       try {
-      const r = streamText({
-      model: wrappedModel,
-      // Empty system prompt → omit entirely. Anthropic's API rejects an
-      // empty `system` block ("system: text content blocks must be non-
-      // empty"); the AI SDK forwards the empty string as a block instead
-      // of skipping it. Pass undefined so the SDK omits the field.
-      system: cached.system && (typeof cached.system !== "string" || cached.system.length > 0)
-        ? cached.system
-        : undefined,
-      messages: finalMessages,
-      tools: cached.tools,
-      stopWhen: stepCountIs(100),
-      abortSignal: runtime.abortSignal,
+        const r = streamText({
+          model: wrappedModel,
+          system:
+            cached.system && (typeof cached.system !== "string" || cached.system.length > 0)
+              ? cached.system
+              : undefined,
+          messages: messagesToSend,
+          tools: cached.tools,
+          stopWhen: stepCountIs(100),
+          abortSignal: runtime.abortSignal,
 
-      onChunk: ({ chunk }) => {
-        // First chunk of this step → emit span.model_first_token. Pair via
-        // model_request_start_id so consumers can split TTFT (start →
-        // first_token) from generation (first_token → end). Any chunk
-        // counts: text-delta, reasoning-delta, or tool-input-start —
-        // whichever fires first signals "the model has begun responding".
-        if (!stepSawFirstChunk && stepStartId) {
-          stepSawFirstChunk = true;
-          runtime.broadcast({
-            type: "span.model_first_token",
-            model: modelId,
-            model_request_start_id: stepStartId,
-          });
-        }
-
-        if (chunk.type === "text-delta") {
-          if (!currentMessageId) {
-            currentMessageId = generateEventId();
-            // Fire-and-forget: AI SDK doesn't await onChunk. The stream_start
-            // event lands at clients via WS broadcast before chunks via the
-            // same single-threaded DO send queue.
-            void runtime.broadcastStreamStart(currentMessageId);
-          }
-          void runtime.broadcastChunk(currentMessageId, chunk.text);
-        } else if (chunk.type === "reasoning-delta") {
-          // AI SDK assigns a stable id per reasoning block. Use it as
-          // the thinking_id so the client can correlate with the
-          // matching agent.thinking event landing in onStepFinish.
-          const tid = (chunk as { id: string; text: string }).id;
-          if (!liveThinking.has(tid)) {
-            liveThinking.add(tid);
-            void runtime.broadcastThinkingStart(tid);
-          }
-          void runtime.broadcastThinkingChunk(tid, (chunk as { text: string }).text);
-        } else if (chunk.type === "tool-input-start") {
-          // toolCallId here matches the eventual tool-call's id, which
-          // becomes agent.tool_use.id. Same correlation contract.
-          const c = chunk as { id: string; toolName: string };
-          if (!liveToolInput.has(c.id)) {
-            liveToolInput.add(c.id);
-            void runtime.broadcastToolInputStart(c.id, c.toolName);
-          }
-        } else if (chunk.type === "tool-input-delta") {
-          const c = chunk as { id: string; delta: string };
-          if (!liveToolInput.has(c.id)) {
-            // Some providers skip the start event; mint lazily.
-            liveToolInput.add(c.id);
-            void runtime.broadcastToolInputStart(c.id);
-          }
-          void runtime.broadcastToolInputChunk(c.id, c.delta);
-        }
-      },
-
-      // experimental_: vercel-ai may rename / change signature without
-      // notice. Pin ai-sdk version on dep upgrade. The stable alternative
-      // (consume `result.fullStream` for `start-step` chunks) requires
-      // intercepting the iterator; this is materially simpler.
-      experimental_onStepStart: () => {
-        stepStartId = generateEventId();
-        stepSawFirstChunk = false;
-        runtime.broadcast({
-          type: "span.model_request_start",
-          id: stepStartId,
-          model: modelId,
-        });
-      },
-
-      onStepFinish: async (step) => {
-        // Iterate step.content[] in order to preserve LLM output ordering
-        // (reasoning → text → tool-call interleaving). The previous "reasoning
-        // first, text next, tool-calls last" loop assumed an ordering AI SDK
-        // doesn't guarantee, breaking byte-determinism on derive().
-        //
-        // Each part maps to exactly one wire event. The mapping is the inverse
-        // of history.ts eventsToMessages — together they form the
-        // ModelMessage[] ↔ SessionEvent[] bijection that prompt-cache
-        // determinism rests on.
-        for (const part of step.content as ReadonlyArray<ContentPart<any>>) {
-          switch (part.type) {
-            case "reasoning": {
-              // AI SDK reasoning parts in step.content[] don't carry the
-              // chunk id directly, but onChunk minted at most one stream
-              // per step in practice. Drain whichever streams are live so
-              // the client closes their pulsing bubbles. The canonical
-              // agent.thinking carries thinking_id only when we can
-              // correlate (single-stream case); multi-stream steps just
-              // see the stream_end + a thinking event without correlation
-              // (renderer falls back to dropping all live streams when
-              // any thinking lands — see frontend).
-              const partWithId = part as { type: "reasoning"; text: string; id?: string; providerMetadata?: unknown };
-              const tid = partWithId.id ?? (liveThinking.size === 1 ? [...liveThinking][0] : undefined);
-              if (tid) {
-                await runtime.broadcastThinkingEnd(tid, "completed");
-                liveThinking.delete(tid);
-              }
+          onChunk: ({ chunk }) => {
+            if (!stepSawFirstChunk && stepStartId) {
+              stepSawFirstChunk = true;
               runtime.broadcast({
-                type: "agent.thinking",
-                text: part.text,
-                providerOptions: part.providerMetadata as Record<string, unknown> | undefined,
-                ...(tid ? { thinking_id: tid } : {}),
-              } as SessionEvent);
-              break;
+                type: "span.model_first_token",
+                model: modelId,
+                model_request_start_id: stepStartId,
+              });
             }
-            case "text": {
-              // Trim trailing whitespace at write time. Anthropic's @ai-sdk
-              // provider trims the LAST text of the LAST assistant message
-              // before sending; without our normalization, the same stored
-              // assistant text would render with vs. without `\n` depending on
-              // whether it's the tail of the conversation, busting the cache
-              // on the next turn.
-              const messageId = currentMessageId ?? generateEventId();
-              if (currentMessageId) {
-                await runtime.broadcastStreamEnd(currentMessageId, "completed");
+
+            if (chunk.type === "text-delta") {
+              if (!currentMessageId) {
+                currentMessageId = generateEventId();
+                void runtime.broadcastStreamStart(currentMessageId);
               }
-              runtime.broadcast({
-                type: "agent.message",
-                message_id: messageId,
-                content: [{ type: "text", text: part.text.replace(/\s+$/, "") }],
-              } as SessionEvent);
-              currentMessageId = null; // reset for next step
-              break;
-            }
-            case "tool-call": {
-              const partTC = part as { type: "tool-call"; toolCallId: string };
-              if (liveToolInput.has(partTC.toolCallId)) {
-                await runtime.broadcastToolInputEnd(partTC.toolCallId, "completed");
-                liveToolInput.delete(partTC.toolCallId);
+              void runtime.broadcastChunk(currentMessageId, chunk.text);
+            } else if (chunk.type === "reasoning-delta") {
+              const tid = (chunk as { id: string; text: string }).id;
+              if (!liveThinking.has(tid)) {
+                liveThinking.add(tid);
+                void runtime.broadcastThinkingStart(tid);
               }
-              emitToolCallEvent(runtime, tools, part);
-              break;
+              void runtime.broadcastThinkingChunk(tid, (chunk as { text: string }).text);
+            } else if (chunk.type === "tool-input-start") {
+              const c = chunk as { id: string; toolName: string };
+              if (!liveToolInput.has(c.id)) {
+                liveToolInput.add(c.id);
+                void runtime.broadcastToolInputStart(c.id, c.toolName);
+              }
+            } else if (chunk.type === "tool-input-delta") {
+              const c = chunk as { id: string; delta: string };
+              if (!liveToolInput.has(c.id)) {
+                liveToolInput.add(c.id);
+                void runtime.broadcastToolInputStart(c.id);
+              }
+              void runtime.broadcastToolInputChunk(c.id, c.delta);
             }
-            case "tool-result":
-            case "tool-error":
-              emitToolResultEvent(runtime, part);
-              break;
-            // source / file / tool-approval-request: not produced by current
-            // tool surface; intentionally skipped. Add cases here if those
-            // become reachable — the bijection requires every part write a
-            // matching wire event.
-          }
-        }
-        // Defensive: any thinking/tool-input streams that didn't pair
-        // with a step.content entry get aborted so the client doesn't
-        // leave bubbles spinning forever.
-        for (const tid of liveThinking) {
-          await runtime.broadcastThinkingEnd(tid, "aborted");
-        }
-        liveThinking.clear();
-        for (const tid of liveToolInput) {
-          await runtime.broadcastToolInputEnd(tid, "aborted");
-        }
-        liveToolInput.clear();
+          },
 
-        // Per-step span.model_request_end. Carries this step's usage and
-        // finishReason — Anthropic's wire format puts model_usage at this
-        // granularity (per actual model API call), not aggregated across
-        // the whole streamText loop. Pair via model_request_start_id so
-        // consumers don't have to FIFO-match.
-        const stepText = (step.content as ReadonlyArray<{ type: string; text?: string }>)
-          .filter((p) => p.type === "text")
-          .map((p) => p.text ?? "")
-          .join("");
-        const providerResponseId = (step.response as { id?: string } | undefined)?.id;
-        // body_r2_key: pointer to the R2-persisted full request/response
-        // for this provider call. Computable from session_id + event_id
-        // at read time; we surface it on the event so consumers don't
-        // have to know the key layout. Absent when llm logging is off.
-        const bodyR2Key = llmLogCtx
-          ? llmLogKey(llmLogCtx.tenant_id, llmLogCtx.session_id, stepStartId ?? "")
-          : undefined;
-        runtime.broadcast({
-          type: "span.model_request_end",
-          model: modelId,
-          model_request_start_id: stepStartId ?? undefined,
-          provider_response_id: providerResponseId,
-          model_usage: step.usage ? {
-            input_tokens: step.usage.inputTokens ?? 0,
-            output_tokens: step.usage.outputTokens ?? 0,
-            cache_read_input_tokens: step.usage.inputTokenDetails?.cacheReadTokens ?? 0,
-            cache_creation_input_tokens: step.usage.inputTokenDetails?.cacheWriteTokens ?? 0,
-          } : undefined,
-          finish_reason: step.finishReason,
-          final_text_length: stepText.length,
-          is_error: false,
-          ...(bodyR2Key ? { body_r2_key: bodyR2Key } : {}),
+          experimental_onStepStart: () => {
+            stepStartId = generateEventId();
+            stepSawFirstChunk = false;
+            runtime.broadcast({
+              type: "span.model_request_start",
+              id: stepStartId,
+              model: modelId,
+            });
+          },
+
+          onStepFinish: async (step) => {
+            for (const part of step.content as ReadonlyArray<ContentPart<any>>) {
+              switch (part.type) {
+                case "reasoning": {
+                  const partWithId = part as {
+                    type: "reasoning";
+                    text: string;
+                    id?: string;
+                    providerMetadata?: unknown;
+                  };
+                  const tid =
+                    partWithId.id ?? (liveThinking.size === 1 ? [...liveThinking][0] : undefined);
+                  if (tid) {
+                    await runtime.broadcastThinkingEnd(tid, "completed");
+                    liveThinking.delete(tid);
+                  }
+                  runtime.broadcast({
+                    type: "agent.thinking",
+                    text: part.text,
+                    providerOptions: part.providerMetadata as Record<string, unknown> | undefined,
+                    ...(tid ? { thinking_id: tid } : {}),
+                  } as SessionEvent);
+                  break;
+                }
+                case "text": {
+                  const messageId = currentMessageId ?? generateEventId();
+                  if (currentMessageId) {
+                    await runtime.broadcastStreamEnd(currentMessageId, "completed");
+                  }
+                  runtime.broadcast({
+                    type: "agent.message",
+                    message_id: messageId,
+                    content: [{ type: "text", text: part.text.replace(/\s+$/, "") }],
+                  } as SessionEvent);
+                  currentMessageId = null;
+                  break;
+                }
+                case "tool-call": {
+                  const partTC = part as { type: "tool-call"; toolCallId: string };
+                  if (liveToolInput.has(partTC.toolCallId)) {
+                    await runtime.broadcastToolInputEnd(partTC.toolCallId, "completed");
+                    liveToolInput.delete(partTC.toolCallId);
+                  }
+                  emitToolCallEvent(runtime, tools, part);
+                  break;
+                }
+                case "tool-result":
+                case "tool-error":
+                  emitToolResultEvent(runtime, part);
+                  break;
+              }
+            }
+
+            for (const tid of liveThinking) {
+              await runtime.broadcastThinkingEnd(tid, "aborted");
+            }
+            liveThinking.clear();
+            for (const tid of liveToolInput) {
+              await runtime.broadcastToolInputEnd(tid, "aborted");
+            }
+            liveToolInput.clear();
+
+            const stepText = (step.content as ReadonlyArray<{ type: string; text?: string }>)
+              .filter((p) => p.type === "text")
+              .map((p) => p.text ?? "")
+              .join("");
+            const providerResponseId = (step.response as { id?: string } | undefined)?.id;
+            const bodyR2Key = llmLogCtx
+              ? llmLogKey(llmLogCtx.tenant_id, llmLogCtx.session_id, stepStartId ?? "")
+              : undefined;
+            runtime.broadcast({
+              type: "span.model_request_end",
+              model: modelId,
+              model_request_start_id: stepStartId ?? undefined,
+              provider_response_id: providerResponseId,
+              model_usage: step.usage
+                ? {
+                    input_tokens: step.usage.inputTokens ?? 0,
+                    output_tokens: step.usage.outputTokens ?? 0,
+                    cache_read_input_tokens: step.usage.inputTokenDetails?.cacheReadTokens ?? 0,
+                    cache_creation_input_tokens: step.usage.inputTokenDetails?.cacheWriteTokens ?? 0,
+                  }
+                : undefined,
+              finish_reason: step.finishReason,
+              final_text_length: stepText.length,
+              is_error: false,
+              ...(bodyR2Key ? { body_r2_key: bodyR2Key } : {}),
+            });
+            stepStartId = null;
+          },
+
+          onError: ({ error }) => {
+            if (!stepStartId) return;
+            let message = error instanceof Error ? error.message : String(error);
+            if (error && typeof error === "object" && "responseBody" in error) {
+              const e = error as { statusCode?: number; responseBody?: string };
+              if (e.statusCode || e.responseBody) {
+                message = `${message} [${e.statusCode ?? "?"}] ${e.responseBody ?? ""}`;
+              }
+            }
+            const overflow = detectContextOverflowError(error);
+            runtime.broadcast({
+              type: "span.model_request_end",
+              model: modelId,
+              model_request_start_id: stepStartId,
+              finish_reason: "error",
+              final_text_length: 0,
+              is_error: true,
+              error_message: message.slice(0, 500),
+              ...(overflow.isOverflow
+                ? {
+                    error_code: "provider_context_window_exceeded",
+                    error_details: {
+                      provider_status: overflow.statusCode,
+                      provider_code: overflow.providerCode,
+                      provider_message: overflow.providerMessage,
+                      estimated_input_tokens: estimatedTokens,
+                      context_window_tokens: ctxWindow,
+                      attempt_id: attempt,
+                    },
+                  }
+                : {}),
+              ...(llmLogCtx
+                ? { body_r2_key: llmLogKey(llmLogCtx.tenant_id, llmLogCtx.session_id, stepStartId) }
+                : {}),
+            } as SessionEvent);
+            stepStartId = null;
+          },
+
+          onAbort: () => {
+            if (!stepStartId) return;
+            runtime.broadcast({
+              type: "span.model_request_end",
+              model: modelId,
+              model_request_start_id: stepStartId,
+              finish_reason: "aborted",
+              final_text_length: 0,
+              is_error: false,
+              ...(llmLogCtx
+                ? { body_r2_key: llmLogKey(llmLogCtx.tenant_id, llmLogCtx.session_id, stepStartId) }
+                : {}),
+            });
+            stepStartId = null;
+            if (currentMessageId) {
+              void runtime.broadcastStreamEnd(currentMessageId, "aborted", "interrupted_mid_stream");
+              currentMessageId = null;
+            }
+            for (const tid of liveThinking) {
+              void runtime.broadcastThinkingEnd(tid, "aborted");
+            }
+            liveThinking.clear();
+            for (const tid of liveToolInput) {
+              void runtime.broadcastToolInputEnd(tid, "aborted");
+            }
+            liveToolInput.clear();
+          },
         });
-        // Clear so onError / onAbort don't double-close.
-        stepStartId = null;
-      },
 
-      onError: ({ error }) => {
-        // streamText aborts the stream on error before onStepFinish can fire
-        // for the failing step. Without closing here, the span.model_request_start
-        // we emitted in the start-step chunk hangs unpaired. Mirror the
-        // shape of the success-path end so consumers can treat is_error as
-        // the success/fail discriminator.
-        if (!stepStartId) return;
-        let message = error instanceof Error ? error.message : String(error);
-        // AI SDK's APICallError exposes the upstream HTTP status + raw response
-        // body, but `error.message` is only the HTTP statusText (e.g. "Bad
-        // Request"). Surface the body too so consumers (oma sessions logs /
-        // console) can see the provider's actual diagnostic without having to
-        // tail wrangler — most 4xx debugging starts and ends here.
-        if (error && typeof error === "object" && "responseBody" in error) {
-          const e = error as { statusCode?: number; responseBody?: string };
-          if (e.statusCode || e.responseBody) {
-            message = `${message} [${e.statusCode ?? "?"}] ${e.responseBody ?? ""}`;
+        try {
+          await r.consumeStream();
+        } catch (err) {
+          if (currentMessageId) {
+            await runtime.broadcastStreamEnd(currentMessageId, "aborted", "interrupted_mid_stream");
+            currentMessageId = null;
           }
+          for (const tid of liveThinking) {
+            await runtime.broadcastThinkingEnd(tid, "aborted");
+          }
+          liveThinking.clear();
+          for (const tid of liveToolInput) {
+            await runtime.broadcastToolInputEnd(tid, "aborted");
+          }
+          liveToolInput.clear();
+          throw err;
         }
-        runtime.broadcast({
-          type: "span.model_request_end",
-          model: modelId,
-          model_request_start_id: stepStartId,
-          finish_reason: "error",
-          final_text_length: 0,
-          is_error: true,
-          error_message: message.slice(0, 500),
-          ...(llmLogCtx
-            ? { body_r2_key: llmLogKey(llmLogCtx.tenant_id, llmLogCtx.session_id, stepStartId) }
-            : {}),
-        } as SessionEvent);
-        stepStartId = null;
-      },
 
-      onAbort: () => {
-        // User interrupt or AbortSignal trip. Same dangling-start problem as
-        // onError. is_error stays false — abort is a normal control flow,
-        // not a model failure.
-        if (!stepStartId) return;
-        runtime.broadcast({
-          type: "span.model_request_end",
-          model: modelId,
-          model_request_start_id: stepStartId,
-          finish_reason: "aborted",
-          final_text_length: 0,
-          is_error: false,
-          ...(llmLogCtx
-            ? { body_r2_key: llmLogKey(llmLogCtx.tenant_id, llmLogCtx.session_id, stepStartId) }
-            : {}),
-        });
-        stepStartId = null;
-        // Drain live chunk-stream registers same way the catch-around-
-        // consumeStream below does. onAbort fires when the model emitted
-        // its content cleanly but a follow-up await (finishReason / text /
-        // step iteration) trips the abort signal — consumeStream itself
-        // doesn't throw in that path, so the catch block doesn't run and
-        // these stream lifecycles would be left half-open without us
-        // emitting the *_stream_end markers here.
-        if (currentMessageId) {
-          void runtime.broadcastStreamEnd(currentMessageId, "aborted", "interrupted_mid_stream");
-          currentMessageId = null;
-        }
-        for (const tid of liveThinking) {
-          void runtime.broadcastThinkingEnd(tid, "aborted");
-        }
-        liveThinking.clear();
-        for (const tid of liveToolInput) {
-          void runtime.broadcastToolInputEnd(tid, "aborted");
-        }
-        liveToolInput.clear();
-      },
-    });
-      // streamText returns a StreamTextResult; consumeStream forces the
-      // pipeline to drain so onChunk + onStepFinish fully fire before
-      // we read final fields.
-      try {
-        await r.consumeStream();
-      } catch (err) {
-        // Mid-stream abort (user.interrupt, abort signal trip). The
-        // streams table has chunks accumulated so far; if we don't
-        // finalize + persist as agent.message here, the partial text
-        // sits at status='streaming' until cold-start recovery picks
-        // it up. broadcastStreamEnd("aborted") does both: finalizes
-        // the row AND appends agent.message with the partial (see
-        // session-do.ts:broadcastStreamEnd) so the next turn's LLM
-        // context includes what the model said before the cut.
-        //
-        // Re-throw so drainEventQueue's TurnAborted handling still
-        // runs (status_idle, queue flush already happened in the
-        // POST /event handler).
-        //
-        // Drain ALL three live-stream registers, not just the message
-        // one — onStepFinish is the only place that drains thinking +
-        // tool-input streams normally, but it doesn't run on abort. A
-        // half-open thinking_stream_start without a matching
-        // thinking_stream_end leaves the client's "Claude is thinking…"
-        // bubble pulsing forever. Same for tool-input streams.
-        if (currentMessageId) {
-          await runtime.broadcastStreamEnd(currentMessageId, "aborted", "interrupted_mid_stream");
-          currentMessageId = null;
-        }
-        for (const tid of liveThinking) {
-          await runtime.broadcastThinkingEnd(tid, "aborted");
-        }
-        liveThinking.clear();
-        for (const tid of liveToolInput) {
-          await runtime.broadcastToolInputEnd(tid, "aborted");
-        }
-        liveToolInput.clear();
-        throw err;
-      }
-      const finishReason = await r.finishReason;
-      const finalText = await r.text;
-      const toolCalls = await r.toolCalls;
-      const toolResults = await r.toolResults;
-      const usage = await r.usage;
+        const finishReason = await r.finishReason;
+        const finalText = await r.text;
+        const toolCalls = await r.toolCalls;
+        const toolResults = await r.toolResults;
+        const usage = await r.usage;
 
-      // Silent-stop detection: model returned with empty text + no tool
-      // calls mid-conversation. Two flavors observed on MiniMax-M2:
-      //   - finish_reason="stop"   — transient model hiccup
-      //   - finish_reason="length" — runaway reasoning consumed the entire
-      //     token budget without producing answer text or tool call
-      //     (`sess-6o5qhaa3v1l5r82h` 2026-05-02: 20 KB of agent.thinking,
-      //     0 chars final text). Without surfacing this as an error the
-      //     turn looks "successful" but ships nothing to the user.
-      // Throw so the failure is visible in events; the caller decides whether
-      // to retry (current default-loop has no internal retry — the throw
-      // propagates as a `unexpected` TurnError up to drainEventQueue).
-      if (
-        (finishReason === "stop" || finishReason === "length")
-        && (!finalText || finalText.trim().length === 0)
-        && (!toolCalls || toolCalls.length === 0)
-      ) {
-        // The current stream (if any) is bogus — abort it before retry mints a fresh id.
-        if (currentMessageId) {
-          await runtime.broadcastStreamEnd(currentMessageId, "aborted", "silent_stop");
+        if (
+          (finishReason === "stop" || finishReason === "length") &&
+          (!finalText || finalText.trim().length === 0) &&
+          (!toolCalls || toolCalls.length === 0)
+        ) {
+          if (currentMessageId) {
+            await runtime.broadcastStreamEnd(currentMessageId, "aborted", "silent_stop");
+          }
+          throw new ModelError(
+            `silent_stop: model returned finish_reason=${finishReason} with empty text and no tool calls`,
+          );
         }
-        // Throw as ModelError so processUserMessage's catch classifies
-        // it as fatal (no retry). silent_stop is deterministic per
-        // (model, prompt) — observed 2026-05-11 sess-y2bfxm1de4e1zqxm
-        // burning 12 LLM calls retrying the same empty response 3x ×
-        // 4 messages. classifyExternalError doesn't have a pattern
-        // for it; we know the class at the throw site, just type it.
-        throw new ModelError(
-          `silent_stop: model returned finish_reason=${finishReason} with empty text and no tool calls`,
-        );
-      }
-      return { finishReason, text: finalText, toolCalls, toolResults, usage };
+        return { finishReason, text: finalText, toolCalls, toolResults, usage };
       } catch (err) {
-        // Boundary: streamText + the read awaits above (finishReason /
-        // text / toolCalls / usage) are the LLM-provider edge. Native
-        // SDK errors (Anthropic 401/429/5xx, the `silent_stop` Error we
-        // throw above, network failures during streamText's underlying
-        // fetch) are remapped to typed OmaErrors here so
-        // processUserMessage's catch dispatches by class (BillingError /
-        // AuthError → fatal; everything else → retry-by-default) instead
-        // of substring matching the message.
-        // TODO: extend wrapper coverage to other boundaries as new
-        // failure modes surface (D1 client, KV ops, MCP transport).
+        const overflow = detectContextOverflowError(err);
+        if (overflow.isOverflow) {
+          // Check single retry eligibility: attempt === 1, no tokens emitted, no side-effect tools started
+          if (attempt === 1 && !stepSawFirstChunk && liveToolInput.size === 0) {
+            console.warn(
+              `[context-overflow] Provider returned context overflow (code=${overflow.providerCode ?? "?"}) on attempt 1. Retrying once with emergency pruned context...`,
+            );
+            // Build emergency pruned context: keep leading summary if present + last 2 messages
+            const emergencyMessages: ModelMessage[] = [];
+            if (
+              messagesToSend.length > 0 &&
+              typeof messagesToSend[0].content === "string" &&
+              messagesToSend[0].content.includes("<conversation-summary>")
+            ) {
+              emergencyMessages.push(messagesToSend[0]);
+            }
+            const tailSlice = messagesToSend.slice(Math.max(0, messagesToSend.length - 2));
+            for (const m of tailSlice) {
+              if (!emergencyMessages.includes(m)) emergencyMessages.push(m);
+            }
+            return await runStreamAttempt(emergencyMessages, 2);
+          }
+
+          // Not eligible or attempt 2 failed: raise structured ContextOverflowError
+          throw new ContextOverflowError(
+            overflow.providerMessage || "Model context window exceeded",
+            {
+              cause: err,
+              code: "provider_context_window_exceeded",
+              details: {
+                provider: modelId,
+                provider_status: overflow.statusCode ?? 400,
+                provider_code: overflow.providerCode,
+                provider_message: overflow.providerMessage,
+                estimated_input_tokens: estimatedTokens,
+                context_window_tokens: ctxWindow,
+                attempt_id: attempt,
+              },
+            },
+          );
+        }
         throw classifyExternalError(err);
       } finally {
         const totalElapsed = Date.now() - streamStartedAt;
-        console.log(`[stream] streamText END elapsed=${totalElapsed}ms`);
+        console.log(`[stream] streamText END attempt=${attempt} elapsed=${totalElapsed}ms`);
       }
-    })();
+    };
+
+    const result = await runStreamAttempt(finalMessages, 1);
 
 
     // 8. Detect pending tool confirmations and custom tool results
@@ -912,35 +890,8 @@ export class DefaultHarness implements HarnessInterface {
 }
 
 // === Token estimation + context-window resolution ===
-// Both are best-effort heuristics. The bijection itself doesn't depend on
-// these — they only drive WHEN to compact, not what the model sees.
-
-/** Crude: 4 chars ≈ 1 token. Fine for compaction trigger; not for billing. */
-function estimateMessageTokens(m: ModelMessage): number {
-  const s = typeof m.content === "string" ? m.content : JSON.stringify(m.content);
-  return Math.ceil(s.length / 4);
-}
-
-function estimateMessagesTokens(messages: ModelMessage[]): number {
-  let total = 0;
-  for (const m of messages) total += estimateMessageTokens(m);
-  return total;
-}
-
-/**
- * Map a LanguageModel to its context window in tokens. ai-sdk doesn't
- * expose this uniformly, so we hand-encode the common cases. Fallback to
- * 200K (Claude 4+ minimum) if unknown.
- */
-function resolveContextWindowTokens(model: LanguageModel): number {
-  const id = (model as any)?.modelId ?? (typeof model === "string" ? model : "");
-  if (typeof id !== "string") return 200_000;
-  if (id.includes("opus-4-7") || id.includes("opus-4-6") || id.includes("sonnet-4-6")) return 1_000_000;
-  if (id.includes("haiku-4-5")) return 200_000;
-  if (id.includes("opus") || id.includes("sonnet")) return 200_000;
-  if (id.includes("MiniMax")) return 1_000_000;
-  return 200_000;
-}
+export { estimateMessageTokens, estimateMessagesTokens } from "./token-estimator";
+export { resolveContextWindowTokens } from "./context-window";
 
 // === Provider-specific prompt cache strategy ===
 //

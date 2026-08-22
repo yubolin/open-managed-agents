@@ -16,6 +16,8 @@ import type {
   UserMessageEvent,
 } from "@open-managed-agents/shared";
 import { generateEventId } from "@open-managed-agents/shared";
+import { projectToolResultForModel } from "../harness/large-tool-result-guard";
+import { estimateContentPartTokens, estimateMessageTokens, IMAGE_TOKEN_SIZE } from "../harness/token-estimator";
 
 /**
  * Resolve a `file_id` (Anthropic Managed Agents spec: ImageBlock/DocumentBlock
@@ -337,7 +339,7 @@ function buildMessages(
           ? (e as AgentToolResultEvent).tool_use_id
           : (e as AgentMcpToolResultEvent).mcp_tool_use_id;
         const toolName = toolNameById.get(toolCallId) ?? "unknown";
-        const output = wireContentToToolOutput((e as AgentToolResultEvent).content);
+        const output = wireContentToToolOutput((e as AgentToolResultEvent).content, toolCallId, toolName);
         pendingToolContent.push({
           type: "tool-result",
           toolCallId,
@@ -445,7 +447,7 @@ async function buildMessagesAsync(
           ? (e as AgentToolResultEvent).tool_use_id
           : (e as AgentMcpToolResultEvent).mcp_tool_use_id;
         const toolName = toolNameById.get(toolCallId) ?? "unknown";
-        const output = wireContentToToolOutput((e as AgentToolResultEvent).content);
+        const output = wireContentToToolOutput((e as AgentToolResultEvent).content, toolCallId, toolName);
         pendingToolContent.push({
           type: "tool-result",
           toolCallId,
@@ -468,68 +470,12 @@ async function buildMessagesAsync(
 const TAIL_MIN_TOKENS = 10_000;
 const TAIL_MAX_TOKENS = 40_000;
 const TAIL_MIN_MESSAGES = 5;
-// Industry-standard heuristic: image blocks bill at a flat ~2K tokens each.
-const IMAGE_TOKEN_SIZE = 2_000;
 
 /**
- * Per-content-part token estimate. Text uses length/4; image/file blocks
- * use a flat 2K; tool-use counts name + JSON input but not the id;
- * reasoning counts the text but not the signature.
- */
-function estimateContentPartTokens(part: unknown): number {
-  if (typeof part === "string") return Math.round(part.length / 4);
-  if (!part || typeof part !== "object") return 0;
-  const p = part as { type?: string; [k: string]: unknown };
-  switch (p.type) {
-    case "text":
-      return Math.round(((p.text as string) ?? "").length / 4);
-    case "reasoning":
-      // Count thinking text only; signature is metadata, not tokenized.
-      return Math.round(((p.text as string) ?? "").length / 4);
-    case "tool-call":
-      return Math.round((((p.toolName as string) ?? "") + JSON.stringify(p.input ?? {})).length / 4);
-    case "tool-result":
-      return estimateToolResultTokens(p.output);
-    case "image":
-    case "file":
-      return IMAGE_TOKEN_SIZE;
-    default:
-      return Math.round(JSON.stringify(part).length / 4);
-  }
-}
-
-function estimateToolResultTokens(output: unknown): number {
-  if (!output || typeof output !== "object") return 0;
-  const o = output as { type?: string; value?: unknown };
-  if (o.type === "text") return Math.round((((o.value as string) ?? "")).length / 4);
-  if (o.type === "content" && Array.isArray(o.value)) {
-    let sum = 0;
-    for (const item of o.value) {
-      if (item && typeof item === "object") {
-        const it = item as { type?: string; text?: string };
-        if (it.type === "text") sum += Math.round((it.text ?? "").length / 4);
-        else if (it.type === "image-data" || it.type === "image-url" || it.type === "file-data" || it.type === "file-url") sum += IMAGE_TOKEN_SIZE;
-        else sum += Math.round(JSON.stringify(item).length / 4);
-      }
-    }
-    return sum;
-  }
-  return Math.round(JSON.stringify(output).length / 4);
-}
-
-/**
- * Per-message estimate. Final result is padded by 4/3 to be conservative,
- * matching the heuristic Claude Code uses so our tail-picking budget aligns
- * with what users have come to expect from CC sessions.
+ * Per-message estimate using CJK & Unicode aware token estimator.
  */
 function estimateMessageTokensCC(m: ModelMessage): number {
-  let total = 0;
-  if (typeof m.content === "string") {
-    total = Math.round(m.content.length / 4);
-  } else if (Array.isArray(m.content)) {
-    for (const part of m.content) total += estimateContentPartTokens(part);
-  }
-  return Math.ceil((total * 4) / 3);
+  return estimateMessageTokens(m);
 }
 
 /**
@@ -575,7 +521,15 @@ function pickPreservedTail(
  */
 function wireContentToToolOutput(
   content: string | ContentBlock[],
+  toolCallId?: string,
+  toolName?: string,
 ): { type: "text"; value: string } | { type: "content"; value: any[] } {
+  if (toolCallId) {
+    const { isExternalized, output } = projectToolResultForModel(content, toolCallId, toolName);
+    if (isExternalized) {
+      return { type: "text", value: output };
+    }
+  }
   if (typeof content === "string") {
     return { type: "text", value: content };
   }
