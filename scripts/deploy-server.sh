@@ -67,6 +67,9 @@ ssh ${SSH_OPTS} "${SERVER_USER}@${SERVER_HOST}" "
   chmod -R 775 data
   echo 'Starting Docker Compose with PostgreSQL backend (oma-server + oma-vault)...'
   docker compose -f docker-compose.postgres.yml up --build -d --remove-orphans oma-server oma-vault
+  echo '🧹 Pruning Docker build cache and dangling images...'
+  docker builder prune -f --keep-storage 2GB 2>/dev/null || docker builder prune -f || true
+  docker image prune -f || true
 "
 
 echo "🩺 [4/4] Polling container health (http://${SERVER_HOST}:8787/health)..."
