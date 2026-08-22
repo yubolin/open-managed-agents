@@ -1316,7 +1316,16 @@ export class SessionDO extends DurableObject<Env> {
           err instanceof TurnAborted && err.cause.kind === "user_aborted";
         if (!isUserInterrupt) {
           const errorMsg = this.describeError(err);
-          const errorEvent: SessionEvent = { type: "session.error", error: errorMsg };
+          const errObj = typeof err === "object" && err !== null
+            ? err as { code?: unknown; details?: unknown }
+            : null;
+          const errorCode = typeof errObj?.code === "string" ? errObj.code : errorMsg;
+          const errorEvent: SessionEvent = {
+            type: "session.error",
+            error: errorCode,
+            ...(errorCode !== errorMsg ? { message: errorMsg } : {}),
+            ...(errObj?.details !== undefined ? { details: errObj.details } : {}),
+          };
           history.append(errorEvent);
           this.broadcastEvent(errorEvent);
         }
@@ -3550,12 +3559,15 @@ export class SessionDO extends DurableObject<Env> {
     baseURL?: string;
     apiCompat: ApiCompat;
     customHeaders?: Record<string, string>;
+    contextWindowTokens?: number;
   }> {
     let apiKey = this.env.ANTHROPIC_API_KEY;
     let baseURL = this.env.ANTHROPIC_BASE_URL;
     let provider: string | undefined;
     let customHeaders: Record<string, string> | undefined;
     let wireModel = handle;
+
+    let contextWindowTokens: number | undefined;
 
     if (this.env.MAIN_DB) {
       try {
@@ -3570,6 +3582,7 @@ export class SessionDO extends DurableObject<Env> {
             wireModel = card.model;
             if (card.base_url) baseURL = card.base_url;
             if (card.custom_headers) customHeaders = card.custom_headers;
+            if (card.context_window_tokens) contextWindowTokens = card.context_window_tokens;
             console.log(`[model-card] resolved from D1: id=${card.id} model_id=${card.model_id} model=${card.model} baseURL=${card.base_url ?? "(default)"} provider=${card.provider}`);
           }
         }
@@ -3585,7 +3598,7 @@ export class SessionDO extends DurableObject<Env> {
       apiCompat = provider as ApiCompat;
     }
 
-    return { model: wireModel, apiKey, baseURL, apiCompat, customHeaders };
+    return { model: wireModel, apiKey, baseURL, apiCompat, customHeaders, contextWindowTokens };
   }
 
   /**
@@ -4564,6 +4577,7 @@ export class SessionDO extends DurableObject<Env> {
       tenant_id: this.state.tenant_id,
       tools: allTools,
       model,
+      contextWindowTokens: creds.contextWindowTokens,
       systemPrompt,
       rawSystemPrompt,
       platformReminders,

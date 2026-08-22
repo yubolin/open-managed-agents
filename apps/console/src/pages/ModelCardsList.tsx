@@ -38,6 +38,7 @@ const INITIAL_FORM = {
   model: "",
   api_key: "",
   base_url: "",
+  context_window_tokens: "",
   is_default: false,
   custom_headers: [{ key: "", value: "" }] as Array<{ key: string; value: string }>,
 };
@@ -122,6 +123,12 @@ export function ModelCardsList() {
         is_default: form.is_default,
       };
       if (form.base_url) payload.base_url = form.base_url;
+      if (form.context_window_tokens) {
+        const tokens = parseInt(form.context_window_tokens, 10);
+        if (!isNaN(tokens) && tokens > 0) payload.context_window_tokens = tokens;
+      } else if (editingId) {
+        payload.context_window_tokens = null;
+      }
       // Serialize custom headers from array to object
       const hdrs: Record<string, string> = {};
       for (const h of form.custom_headers) {
@@ -172,6 +179,7 @@ export function ModelCardsList() {
       model: card.model,
       api_key: "",
       base_url: card.base_url || "",
+      context_window_tokens: card.context_window_tokens ? String(card.context_window_tokens) : "",
       is_default: card.is_default || false,
       custom_headers: hdrs,
     });
@@ -480,6 +488,21 @@ export function ModelCardsList() {
               </div>
             </div>
           )}
+          <div>
+            <label htmlFor="modelcard-context-window" className="text-sm text-fg-muted block mb-1">
+              Context Window (tokens)
+              <span className="ml-1 text-xs text-fg-subtle">(optional override; e.g. 204800, 1000000)</span>
+            </label>
+            <input
+              id="modelcard-context-window"
+              type="number"
+              value={form.context_window_tokens}
+              onChange={(e) => setForm({ ...form, context_window_tokens: e.target.value })}
+              className={inputCls}
+              placeholder="e.g. 200000"
+              autoComplete="off"
+            />
+          </div>
           <label className="flex items-center gap-2 text-sm text-fg-muted cursor-pointer">
             <input type="checkbox" checked={form.is_default} onChange={(e) => setForm({ ...form, is_default: e.target.checked })} className="rounded accent-brand" />
             Set as default model card

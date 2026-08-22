@@ -3,7 +3,7 @@ import { useNavigate } from "react-router";
 import { Controller, useFieldArray, useForm, type Resolver } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
-import { ArchiveIcon, TrashIcon } from "lucide-react";
+import { ArchiveIcon, PencilIcon, TrashIcon } from "lucide-react";
 import { useApi, ApiError } from "../lib/api";
 import { useInfiniteApiQuery } from "../lib/useApiQuery";
 import { Modal } from "../components/Modal";
@@ -233,6 +233,9 @@ export function SessionsList() {
   const [memoryStores, setMemoryStores] = useState<MemoryStorePick[]>([]);
   const [, setAuxLoading] = useState(true);
   const [showCreate, setShowCreate] = useState(false);
+  const [renamingSession, setRenamingSession] = useState<Session | null>(null);
+  const [renameTitle, setRenameTitle] = useState("");
+  const [isRenaming, setIsRenaming] = useState(false);
   // Per-field reveal toggle for any masked input (env value, github token).
   // Keyed by `${idx}:${field}`. We intentionally don't try to keep stale
   // entries valid across resource list mutations — adding/removing a row
@@ -496,6 +499,36 @@ export function SessionsList() {
     }, 0);
   }, [reset, trigger, agents, envs]);
 
+  const openRenameModal = useCallback((session: Session) => {
+    setRenamingSession(session);
+    setRenameTitle(session.title ?? "");
+  }, []);
+
+  const closeRenameModal = useCallback(() => {
+    if (isRenaming) return;
+    setRenamingSession(null);
+    setRenameTitle("");
+  }, [isRenaming]);
+
+  const onRenameSubmit = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    if (!renamingSession || isRenaming) return;
+    setIsRenaming(true);
+    try {
+      await api(`/v1/sessions/${renamingSession.id}`, {
+        method: "POST",
+        body: JSON.stringify({ title: renameTitle.trim() }),
+      });
+      setRenamingSession(null);
+      setRenameTitle("");
+      refreshSessions();
+    } catch {
+      // api wrapper surfaces errors as toasts
+    } finally {
+      setIsRenaming(false);
+    }
+  };
+
   const onSubmit = async (data: FormValues) => {
     try {
       const resources: Array<Record<string, unknown>> = [];
@@ -544,7 +577,7 @@ export function SessionsList() {
 
       const body: Record<string, unknown> = {
         agent: data.agent,
-        title: data.title || undefined,
+        title: data.title?.trim() || undefined,
       };
       // Only send environment_id when the user actually picked one. For
       // local-runtime agents the picker is hidden and the server picks a
@@ -779,6 +812,11 @@ export function SessionsList() {
               label={`Actions for ${label}`}
               actions={[
                 {
+                  label: "Rename",
+                  icon: <PencilIcon className="size-4" />,
+                  onSelect: () => openRenameModal(s),
+                },
+                {
                   label: archived ? "Unarchive" : "Archive",
                   icon: <ArchiveIcon className="size-4" />,
                   disabled: archived,
@@ -812,7 +850,7 @@ export function SessionsList() {
         size: 56,
       },
     ],
-    [api, refreshSessions],
+    [api, refreshSessions, openRenameModal],
   );
 
   const hasActiveFilter = !!search || !!filterAgent || status !== "any" || created.after !== undefined || created.before !== undefined;
@@ -940,7 +978,7 @@ export function SessionsList() {
             </p>
           )}
           <div>
-            <label htmlFor="session-title" className="text-sm text-fg-muted block mb-1">Title <span className="text-fg-subtle">(optional)</span></label>
+            <label htmlFor="session-name" className="text-sm text-fg-muted block mb-1">Name <span className="text-fg-subtle">(optional)</span></label>
             {/* autoComplete=off + an unrecognised name to defeat Chrome /
                 Safari email autofill — first text input in the dialog
                 got pre-filled with the user's saved email otherwise.
@@ -948,9 +986,12 @@ export function SessionsList() {
                 renders the autofill-defeating attribute while RHF still
                 tracks the field by its registered name internally. */}
             <input
-              id="session-title"
+              id="session-name"
               {...register("title")}
               name="oma-session-title"
+              onChange={(e) => {
+                setValue("title", e.target.value, { shouldValidate: true, shouldDirty: true });
+              }}
               className={inputCls}
               placeholder="My conversation"
               autoComplete="off"
@@ -1259,6 +1300,47 @@ export function SessionsList() {
             </div>
           </div>
         </div>
+      </Modal>
+
+      <Modal
+        open={!!renamingSession}
+        onClose={closeRenameModal}
+        title="Rename Session"
+        subtitle={renamingSession ? `Set a new name for session ${renamingSession.id}.` : undefined}
+        maxWidth="max-w-md"
+        footer={
+          <>
+            <Button variant="ghost" onClick={closeRenameModal} disabled={isRenaming}>
+              Cancel
+            </Button>
+            <Button
+              onClick={() => onRenameSubmit()}
+              disabled={isRenaming}
+              loading={isRenaming}
+            >
+              Save
+            </Button>
+          </>
+        }
+      >
+        <form onSubmit={onRenameSubmit} className="space-y-4">
+          <div>
+            <label htmlFor="rename-session-name" className="text-sm text-fg-muted block mb-1">
+              Name
+            </label>
+            <input
+              id="rename-session-name"
+              type="text"
+              className={inputCls}
+              value={renameTitle}
+              onChange={(e) => setRenameTitle(e.target.value)}
+              placeholder="My conversation"
+              disabled={isRenaming}
+              autoFocus
+              autoComplete="off"
+            />
+          </div>
+        </form>
       </Modal>
     </DataTable>
   );

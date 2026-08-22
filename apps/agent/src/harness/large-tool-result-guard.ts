@@ -27,7 +27,11 @@ export function sha256Hex(str: string): string {
   return fallbackSha256(str);
 }
 
-function fallbackSha256(ascii: string): string {
+function fallbackSha256(str: string): string {
+  const bytes = new TextEncoder().encode(str);
+  let ascii = "";
+  for (let i = 0; i < bytes.length; i++) ascii += String.fromCharCode(bytes[i]);
+
   function rightRotate(value: number, amount: number) {
     return (value >>> amount) | (value << (32 - amount));
   }
@@ -204,11 +208,50 @@ export async function materializeToolResultToWorkspace(
 ): Promise<void> {
   if (!sandbox || rawContent.length <= MAX_INLINE_RESULT_CHARS) return;
 
-  try {
-    const path = `/workspace/.mcp/${toolCallId}.txt`;
-    await sandbox.writeFile(path, rawContent);
-  } catch (err) {
-    // Ephemeral materialization failure should not crash the turn
-    console.warn(`[materializeToolResult] failed to write ${toolCallId} to workspace: ${(err as Error).message}`);
+  const path = `/workspace/.mcp/${toolCallId}.txt`;
+  await sandbox.writeFile(path, rawContent);
+}
+
+async function checkSandboxFileExists(sandbox: SandboxExecutor, path: string): Promise<boolean> {
+  if (typeof sandbox.fileExists === "function") {
+    return sandbox.fileExists(path);
   }
+  try {
+    await sandbox.readFile(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Rebuild/materialize all externalized tool results from historical events into the sandbox workspace.
+ * Ensures that after a sandbox restart, any `/workspace/.mcp/${toolCallId}.txt` referenced in history
+ * exists on disk in the sandbox before subsequent turns execute.
+ *
+ * Checks file existence and only materializes missing files to avoid sequential write latency.
+ * Returns the count of files actually written to the workspace.
+ */
+export async function rebuildExternalizedToolResultsFromEvents(
+  sandbox: SandboxExecutor | undefined,
+  events: Array<{ type: string; [key: string]: any }>,
+): Promise<number> {
+  if (!sandbox) return 0;
+  let count = 0;
+  for (const event of events) {
+    if (event.type === "agent.tool_result" || event.type === "agent.mcp_tool_result") {
+      const toolCallId = event.tool_use_id ?? event.mcp_tool_use_id;
+      if (!toolCallId || !event.content) continue;
+      const rawText = extractRawTextFromToolContent(event.content);
+      if (rawText.length > MAX_INLINE_RESULT_CHARS) {
+        const path = `/workspace/.mcp/${toolCallId}.txt`;
+        const exists = await checkSandboxFileExists(sandbox, path);
+        if (!exists) {
+          await materializeToolResultToWorkspace(sandbox, toolCallId, rawText);
+          count++;
+        }
+      }
+    }
+  }
+  return count;
 }

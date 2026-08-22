@@ -508,3 +508,60 @@ describe("ModelCardService — api_key crypto boundary", () => {
     ).toBeNull();
   });
 });
+
+describe("ModelCardService — context_window_tokens", () => {
+  it("persists and updates context_window_tokens", async () => {
+    const { service } = createInMemoryModelCardService();
+    const created = await service.create({
+      tenantId: TENANT,
+      modelId: "custom-deepseek",
+      provider: "oai-compatible",
+      apiKey: "sk-test",
+      contextWindowTokens: 64_000,
+    });
+    expect(created.context_window_tokens).toBe(64_000);
+
+    const got = await service.get({ tenantId: TENANT, cardId: created.id });
+    expect(got?.context_window_tokens).toBe(64_000);
+
+    const updated = await service.update({
+      tenantId: TENANT,
+      cardId: created.id,
+      contextWindowTokens: 128_000,
+    });
+    expect(updated.context_window_tokens).toBe(128_000);
+  });
+
+  it.each([0, -1, 999, 1.5, Number.NaN, Number.POSITIVE_INFINITY])(
+    "rejects invalid context window value %s",
+    async (contextWindowTokens) => {
+      const { service } = createInMemoryModelCardService();
+      await expect(
+        service.create({
+          tenantId: TENANT,
+          modelId: `invalid-${String(contextWindowTokens)}`,
+          provider: "oai-compatible",
+          apiKey: "sk-test",
+          contextWindowTokens,
+        }),
+      ).rejects.toMatchObject({ code: "context_window_invalid" });
+    },
+  );
+
+  it("allows null to clear context_window_tokens", async () => {
+    const { service } = createInMemoryModelCardService();
+    const created = await service.create({
+      tenantId: TENANT,
+      modelId: "clear-window",
+      provider: "oai-compatible",
+      apiKey: "sk-test",
+      contextWindowTokens: 64_000,
+    });
+    const updated = await service.update({
+      tenantId: TENANT,
+      cardId: created.id,
+      contextWindowTokens: null,
+    });
+    expect(updated.context_window_tokens).toBeNull();
+  });
+});

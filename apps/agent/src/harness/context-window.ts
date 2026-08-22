@@ -4,17 +4,38 @@ import type { LanguageModel } from "ai";
 export const DEFAULT_MAX_OUTPUT_TOKENS = 8_192;
 export const DEFAULT_PROTOCOL_RESERVE_TOKENS = 4_096;
 
+export class UnknownModelContextWindowError extends Error {
+  readonly code = "context_window_unknown";
+  readonly details: { model_id: string };
+
+  constructor(modelId: string) {
+    super(
+      `Cannot resolve context window for unknown or missing model "${modelId || "(empty)"}". ` +
+      `Configure explicit context_window_tokens on the model card or use a supported catalog model.`,
+    );
+    this.name = "UnknownModelContextWindowError";
+    this.details = { model_id: modelId };
+  }
+}
+
+const EXACT_MODEL_CONTEXT_WINDOWS: Readonly<Record<string, number>> = {
+  "minimax-m2.7": 204_800,
+  "minimax-text-01": 204_800,
+  "minimax-m2-highspeed": 204_800,
+  "minimax-coding-plan-mcp": 204_800,
+};
+
 /**
  * Resolve the context window in tokens for a given model and optional ModelCard config.
  *
  * Priority:
  * 1. Explicit `modelCard.context_window_tokens`
  * 2. Case-insensitive model ID catalog lookup
- * 3. Safe baseline fallback (200,000 tokens)
+ * 3. Fail-closed: throws UnknownModelContextWindowError
  */
 export function resolveContextWindowTokens(
   model: LanguageModel | string,
-  modelCard?: { context_window_tokens?: number } | null,
+  modelCard?: { context_window_tokens?: number | null } | null,
 ): number {
   if (modelCard?.context_window_tokens && modelCard.context_window_tokens > 0) {
     return modelCard.context_window_tokens;
@@ -22,15 +43,13 @@ export function resolveContextWindowTokens(
 
   const rawId = (model as { modelId?: string })?.modelId ?? (typeof model === "string" ? model : "");
   if (!rawId || typeof rawId !== "string") {
-    return 200_000;
+    throw new UnknownModelContextWindowError(String(rawId ?? ""));
   }
 
   const id = rawId.toLowerCase();
 
-  // MiniMax models: M2.7, Text-01, etc. -> 204,800 tokens
-  if (id.includes("minimax")) {
-    return 204_800;
-  }
+  const exactWindow = EXACT_MODEL_CONTEXT_WINDOWS[id];
+  if (exactWindow !== undefined) return exactWindow;
 
   // Claude 4.6+ / 4.7 1M context models
   if (id.includes("opus-4-7") || id.includes("opus-4-6") || id.includes("sonnet-4-6")) {
@@ -49,10 +68,11 @@ export function resolveContextWindowTokens(
     return 200_000;
   }
 
-  // OpenAI GPT-4o / GPT-4.5 / O1 / O3 models
+  // OpenAI GPT-4.5 / O1 / O3 models -> 200,000
   if (id.includes("gpt-4.5") || id.includes("o1") || id.includes("o3")) {
     return 200_000;
   }
+  // OpenAI GPT-4o / GPT-4 -> 128,000
   if (id.includes("gpt-4o") || id.includes("gpt-4")) {
     return 128_000;
   }
@@ -62,8 +82,8 @@ export function resolveContextWindowTokens(
     return 64_000;
   }
 
-  // Safe fallback
-  return 200_000;
+  // SDS fail-closed policy: unknown model with no explicit context_window_tokens
+  throw new UnknownModelContextWindowError(rawId);
 }
 
 /**

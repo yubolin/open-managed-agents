@@ -36,6 +36,7 @@ export interface NewModelCardInput {
    * the partial UNIQUE index would reject the insert.
    */
   isDefault: boolean;
+  contextWindowTokens?: number | null;
   createdAt: number;
 }
 
@@ -55,6 +56,7 @@ export interface ModelCardUpdateFields {
    * to 1. When false, the repo just sets is_default=0.
    */
   isDefault?: boolean;
+  contextWindowTokens?: number | null;
   updatedAt: number;
 }
 

@@ -69,6 +69,8 @@ export interface SandboxExecutor {
    * the string-based writeFile would corrupt them via UTF-8 round-tripping.
    */
   writeFileBytes?(path: string, bytes: Uint8Array): Promise<string>;
+  /** Check whether a file or directory exists in the sandbox. */
+  fileExists?(path: string): Promise<boolean>;
   /**
    * Mount a memory store into the sandbox at /mnt/memory/<storeName>/.
    * On CF backed by R2 + FUSE; on Node we hydrate by copying. Read-only

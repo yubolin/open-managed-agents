@@ -1380,7 +1380,7 @@ function AttachButton() {
   );
 }
 
-function EventRender({
+export function EventRender({
   event,
   livePending = false,
   pairedResult,
@@ -1611,10 +1611,29 @@ function EventRender({
       );
     }
 
-    case "session.error":
+    case "session.error": {
+      const errorText = (() => {
+        const err = event.error;
+        if (typeof err === "string" && err.length > 0) return err;
+        if (err && typeof err === "object") {
+          if ("message" in err && typeof (err as { message: unknown }).message === "string") {
+            return (err as { message: string }).message;
+          }
+          try {
+            return JSON.stringify(err);
+          } catch {
+            return String(err);
+          }
+        }
+        return err ? String(err) : "Unknown error";
+      })();
+
       return (
         <div className="max-w-2xl bg-danger-subtle rounded-lg px-4 py-2.5 text-sm text-danger">
-          <div>Error: {event.error}</div>
+          <div>Error: {errorText}</div>
+          {event.message && (
+            <div className="mt-1 text-[13px] opacity-90">{event.message}</div>
+          )}
           {modelErrorCause && (
             <div className="mt-1.5 pt-1.5 text-[12px] opacity-90">
               <span className="font-medium">Cause</span>
@@ -1624,8 +1643,14 @@ function EventRender({
               : {modelErrorCause.error}
             </div>
           )}
+          {event.details != null && (
+            <pre className="mt-2 p-2 bg-white/50 rounded overflow-x-auto text-[11px] font-mono text-danger-emphasis">
+              {JSON.stringify(event.details, null, 2)}
+            </pre>
+          )}
         </div>
       );
+    }
 
     case "session.warning":
       return (

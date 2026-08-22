@@ -1,7 +1,7 @@
 // @ts-nocheck
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 import { env, exports } from "cloudflare:workers";
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { registerHarness } from "../../apps/agent/src/harness/registry";
 import { resolveSkills, registerSkill } from "../../apps/agent/src/harness/skills";
 import { SummarizeCompaction } from "../../apps/agent/src/harness/compaction";
@@ -372,6 +372,70 @@ describe("Sandbox lifecycle", () => {
     expect(result).toContain("fatal: could not read Username");
     expect(result).toContain("Hint:");
     expect(result).toContain("secret-backed command (`git`)");
+  });
+
+  it("CloudflareSandbox.fileExists uses sandbox.exists metadata call and never calls readFile", async () => {
+    let existsCalledWith = "";
+    const readFileSpy = vi.fn();
+    const fakeSandbox = {
+      exists: async (path: string) => {
+        existsCalledWith = path;
+        return { success: true, exists: true, path, timestamp: new Date().toISOString() };
+      },
+      readFile: readFileSpy,
+    };
+    const sandbox = new CloudflareSandbox({ SANDBOX: {} } as any, "test-session-id") as any;
+    sandbox.sandboxPromise = Promise.resolve(fakeSandbox);
+
+    // 1. Returns true only for valid success === true && exists === true
+    const exists = await sandbox.fileExists("/workspace/.mcp/call_123.txt");
+    expect(exists).toBe(true);
+    expect(existsCalledWith).toBe("/workspace/.mcp/call_123.txt");
+    expect(readFileSpy).not.toHaveBeenCalled();
+
+    // 2. Returns false only for valid success === true && exists === false
+    fakeSandbox.exists = async (path: string) => ({
+      success: true,
+      exists: false,
+      path,
+      timestamp: new Date().toISOString(),
+    });
+    const missing = await sandbox.fileExists("/workspace/.mcp/missing.txt");
+    expect(missing).toBe(false);
+    expect(readFileSpy).not.toHaveBeenCalled();
+
+    // 3. Rejects on success === false
+    fakeSandbox.exists = async () => ({
+      success: false,
+      exists: false,
+      path: "",
+      timestamp: "",
+    });
+    await expect(sandbox.fileExists("/workspace/.mcp/fail.txt")).rejects.toThrow("success=false");
+    expect(readFileSpy).not.toHaveBeenCalled();
+
+    // 4. Rejects on malformed response (missing boolean exists property)
+    fakeSandbox.exists = async () => ({
+      success: true,
+      exists: undefined,
+      path: "",
+      timestamp: "",
+    });
+    await expect(sandbox.fileExists("/workspace/.mcp/malformed.txt")).rejects.toThrow("invalid exists property");
+    expect(readFileSpy).not.toHaveBeenCalled();
+
+    // 5. Rejects on SDK throw / transport error
+    fakeSandbox.exists = async () => {
+      throw new Error("Container communication timeout");
+    };
+    await expect(sandbox.fileExists("/workspace/.mcp/timeout.txt")).rejects.toThrow("Container communication timeout");
+    expect(readFileSpy).not.toHaveBeenCalled();
+
+    // 6. Rejects when sandbox does not support exists()
+    const sandboxNoExists = new CloudflareSandbox({ SANDBOX: {} } as any, "test-session-id") as any;
+    sandboxNoExists.sandboxPromise = Promise.resolve({ readFile: readFileSpy });
+    await expect(sandboxNoExists.fileExists("/workspace/.mcp/unsupported.txt")).rejects.toThrow("does not support exists()");
+    expect(readFileSpy).not.toHaveBeenCalled();
   });
 
   it("TestSandbox exec works with various commands", async () => {

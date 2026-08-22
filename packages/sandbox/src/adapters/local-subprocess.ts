@@ -370,6 +370,15 @@ export class LocalSubprocessSandbox implements SandboxExecutor {
     return fs.readFile(this.resolvePath(path), "utf8");
   }
 
+  async fileExists(path: string): Promise<boolean> {
+    try {
+      await fs.access(this.resolvePath(path));
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   async readFileBytes(path: string): Promise<Uint8Array> {
     const buf = await fs.readFile(this.resolvePath(path));
     return new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength);

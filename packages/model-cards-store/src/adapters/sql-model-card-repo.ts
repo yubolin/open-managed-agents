@@ -61,6 +61,7 @@ export class SqlModelCardRepo implements ModelCardRepo {
       api_key_cipher: input.apiKeyCipher,
       api_key_preview: input.apiKeyPreview,
       is_default: input.isDefault ? 1 : 0,
+      context_window_tokens: input.contextWindowTokens ?? null,
       created_at: input.createdAt,
     });
 
@@ -216,6 +217,7 @@ export class SqlModelCardRepo implements ModelCardRepo {
     if (update.apiKeyCipher !== undefined) set.api_key_cipher = update.apiKeyCipher;
     if (update.apiKeyPreview !== undefined) set.api_key_preview = update.apiKeyPreview;
     if (update.isDefault !== undefined) set.is_default = update.isDefault ? 1 : 0;
+    if (update.contextWindowTokens !== undefined) set.context_window_tokens = update.contextWindowTokens;
 
     const updateQ = this.db
       .update(model_cards)
@@ -343,6 +345,8 @@ function toRow(r: typeof model_cards.$inferSelect): ModelCardRow {
     // numbers. Normalize at the adapter boundary so SQLite and PG expose the
     // same domain shape.
     is_default: Number(r.is_default) === 1,
+    context_window_tokens:
+      r.context_window_tokens != null ? Number(r.context_window_tokens) : null,
     created_at: msToIso(r.created_at),
     updated_at: r.updated_at !== null ? msToIso(r.updated_at) : null,
     archived_at: r.archived_at !== null ? msToIso(r.archived_at) : null,

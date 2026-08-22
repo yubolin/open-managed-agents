@@ -1,6 +1,6 @@
 import { generateModelCardId } from "@open-managed-agents/shared";
 import { paginateVia } from "@open-managed-agents/shared";
-import { ModelCardNotFoundError } from "./errors";
+import { ModelCardNotFoundError, ModelCardInvalidContextWindowError } from "./errors";
 import type {
   Clock,
   Crypto,
@@ -79,10 +79,12 @@ export class ModelCardService {
     apiKey: string;
     baseUrl?: string | null;
     customHeaders?: Record<string, string> | null;
+    contextWindowTokens?: number | null;
     /** When true, atomically clears any existing default before inserting. */
     makeDefault?: boolean;
   }): Promise<ModelCardRow> {
     const apiKeyCipher = await this.crypto.encrypt(opts.apiKey);
+    this.validateContextWindowTokens(opts.contextWindowTokens);
     return await this.repo.insert({
       id: this.ids.modelCardId(),
       tenantId: opts.tenantId,
@@ -91,6 +93,7 @@ export class ModelCardService {
       model: opts.model ?? opts.modelId,
       baseUrl: opts.baseUrl ?? null,
       customHeaders: opts.customHeaders ?? null,
+      contextWindowTokens: opts.contextWindowTokens ?? null,
       apiKeyCipher,
       apiKeyPreview: apiKeyPreview(opts.apiKey),
       isDefault: !!opts.makeDefault,
@@ -110,18 +113,21 @@ export class ModelCardService {
     baseUrl?: string | null;
     /** Pass `null` to clear. Pass an object to replace. */
     customHeaders?: Record<string, string> | null;
+    contextWindowTokens?: number | null;
     /** New plaintext api_key. Service derives + stores cipher + preview. */
     apiKey?: string;
     /** Atomically clears other defaults if true (per partial UNIQUE). */
     isDefault?: boolean;
   }): Promise<ModelCardRow> {
     await this.requireCard(opts);
+    this.validateContextWindowTokens(opts.contextWindowTokens);
     const update: ModelCardUpdateFields = { updatedAt: this.clock.nowMs() };
     if (opts.provider !== undefined) update.provider = opts.provider;
     if (opts.modelId !== undefined) update.modelId = opts.modelId;
     if (opts.model !== undefined) update.model = opts.model;
     if (opts.baseUrl !== undefined) update.baseUrl = opts.baseUrl;
     if (opts.customHeaders !== undefined) update.customHeaders = opts.customHeaders;
+    if (opts.contextWindowTokens !== undefined) update.contextWindowTokens = opts.contextWindowTokens;
     if (opts.isDefault !== undefined) update.isDefault = opts.isDefault;
     if (opts.apiKey !== undefined) {
       update.apiKeyCipher = await this.crypto.encrypt(opts.apiKey);
@@ -253,6 +259,27 @@ export class ModelCardService {
     const row = await this.repo.get(opts.tenantId, opts.cardId);
     if (!row) throw new ModelCardNotFoundError();
     return row;
+  }
+
+  /**
+   * Validates contextWindowTokens on create/update.
+   * - undefined: no-op (field not provided)
+   * - null: OK (clears the value)
+   * - number: must be a positive safe integer ≥ 1000
+   */
+  private validateContextWindowTokens(value: number | null | undefined): void {
+    if (value === undefined || value === null) return;
+    if (
+      typeof value !== "number" ||
+      !Number.isInteger(value) ||
+      !Number.isFinite(value) ||
+      value < 1000 ||
+      value > Number.MAX_SAFE_INTEGER
+    ) {
+      throw new ModelCardInvalidContextWindowError(
+        `contextWindowTokens must be a positive integer of at least 1000 tokens (got ${value}). Pass null to clear the value.`,
+      );
+    }
   }
 }
 

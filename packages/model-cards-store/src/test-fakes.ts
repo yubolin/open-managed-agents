@@ -30,6 +30,7 @@ interface InMemModelCard {
   api_key_cipher: string;
   api_key_preview: string;
   is_default: boolean;
+  context_window_tokens: number | null;
   created_at: number;
   updated_at: number | null;
   archived_at: number | null;
@@ -64,6 +65,7 @@ export class InMemoryModelCardRepo implements ModelCardRepo {
       api_key_cipher: input.apiKeyCipher,
       api_key_preview: input.apiKeyPreview,
       is_default: input.isDefault,
+      context_window_tokens: input.contextWindowTokens ?? null,
       created_at: input.createdAt,
       updated_at: null,
       archived_at: null,
@@ -189,6 +191,7 @@ export class InMemoryModelCardRepo implements ModelCardRepo {
     if (update.apiKeyCipher !== undefined) row.api_key_cipher = update.apiKeyCipher;
     if (update.apiKeyPreview !== undefined) row.api_key_preview = update.apiKeyPreview;
     if (update.isDefault !== undefined) row.is_default = update.isDefault;
+    if (update.contextWindowTokens !== undefined) row.context_window_tokens = update.contextWindowTokens ?? null;
     row.updated_at = update.updatedAt;
 
     // Final partial-UNIQUE assertion — should never fire on the service path.
@@ -334,6 +337,7 @@ function toRow(c: InMemModelCard): ModelCardRow {
     custom_headers: c.custom_headers,
     api_key_preview: c.api_key_preview,
     is_default: c.is_default,
+    context_window_tokens: c.context_window_tokens,
     created_at: msToIso(c.created_at),
     updated_at: c.updated_at !== null ? msToIso(c.updated_at) : null,
     archived_at: c.archived_at !== null ? msToIso(c.archived_at) : null,

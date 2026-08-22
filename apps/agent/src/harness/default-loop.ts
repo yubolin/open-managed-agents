@@ -8,7 +8,11 @@ import { SummarizeCompactionStrategy, resolveCompactionStrategy } from "./compac
 import type { CompactionStrategy } from "./compaction";
 import { ALL_TOOLS } from "./tools";
 import { llmLoggingMiddleware, llmLogKey } from "./llm-logging-middleware";
-import { resolveContextWindowTokens, computeUsableInputTokens } from "./context-window";
+import { resolveContextWindowTokens, computeUsableInputTokens, DEFAULT_MAX_OUTPUT_TOKENS } from "./context-window";
+import {
+  projectToolResultForModel,
+  rebuildExternalizedToolResultsFromEvents,
+} from "./large-tool-result-guard";
 import {
   estimateFullContextTokens,
   estimateMessagesTokens,
@@ -335,10 +339,18 @@ export class DefaultHarness implements HarnessInterface {
     // event with summary — derive() then sees the boundary and serves the
     // summarized view from this turn forward (NOT recomputed per turn).
     const allEvents = runtime.history.getEvents();
-    const ctxWindow = resolveContextWindowTokens(model);
+    if (runtime.sandbox) {
+      await rebuildExternalizedToolResultsFromEvents(runtime.sandbox, allEvents);
+    }
+    const ctxWindow = resolveContextWindowTokens(model, { context_window_tokens: ctx.contextWindowTokens });
     if (this.shouldCompact && this.compact && this.shouldCompact(allEvents, { contextWindowTokens: ctxWindow })) {
       try {
-        await this.compact(allEvents, runtime, { model, systemPrompt, tools });
+        await this.compact(allEvents, runtime, {
+          model,
+          systemPrompt,
+          tools,
+          contextWindowTokens: ctx.contextWindowTokens,
+        });
       } catch (err) {
         // Compaction is best-effort. Log and continue — the next turn will
         // try again. Don't fail the whole turn over a summarize error.
@@ -426,6 +438,8 @@ export class DefaultHarness implements HarnessInterface {
       const liveToolInput = new Set<string>();
       let stepStartId: string | null = null;
       let stepSawFirstChunk = false;
+      let attemptSawFirstChunk = false;
+      let attemptSawToolExecution = false;
 
       const streamStartedAt = Date.now();
       console.log(
@@ -455,17 +469,25 @@ export class DefaultHarness implements HarnessInterface {
               : undefined,
           messages: messagesToSend,
           tools: cached.tools,
+          maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS,
+          prepareStep: ({ messages, stepNumber }) =>
+            stepNumber === 0
+              ? undefined
+              : { messages: projectLargeToolResultsForProviderStep(messages) },
           stopWhen: stepCountIs(100),
           abortSignal: runtime.abortSignal,
 
           onChunk: ({ chunk }) => {
-            if (!stepSawFirstChunk && stepStartId) {
-              stepSawFirstChunk = true;
-              runtime.broadcast({
-                type: "span.model_first_token",
-                model: modelId,
-                model_request_start_id: stepStartId,
-              });
+            if (chunk.type === "text-delta" || chunk.type === "reasoning-delta") {
+              if (!stepSawFirstChunk && stepStartId) {
+                stepSawFirstChunk = true;
+                attemptSawFirstChunk = true;
+                runtime.broadcast({
+                  type: "span.model_first_token",
+                  model: modelId,
+                  model_request_start_id: stepStartId,
+                });
+              }
             }
 
             if (chunk.type === "text-delta") {
@@ -483,12 +505,14 @@ export class DefaultHarness implements HarnessInterface {
               void runtime.broadcastThinkingChunk(tid, (chunk as { text: string }).text);
             } else if (chunk.type === "tool-input-start") {
               const c = chunk as { id: string; toolName: string };
+              attemptSawToolExecution = true;
               if (!liveToolInput.has(c.id)) {
                 liveToolInput.add(c.id);
                 void runtime.broadcastToolInputStart(c.id, c.toolName);
               }
             } else if (chunk.type === "tool-input-delta") {
               const c = chunk as { id: string; delta: string };
+              attemptSawToolExecution = true;
               if (!liveToolInput.has(c.id)) {
                 liveToolInput.add(c.id);
                 void runtime.broadcastToolInputStart(c.id);
@@ -545,6 +569,7 @@ export class DefaultHarness implements HarnessInterface {
                   break;
                 }
                 case "tool-call": {
+                  attemptSawToolExecution = true;
                   const partTC = part as { type: "tool-call"; toolCallId: string };
                   if (liveToolInput.has(partTC.toolCallId)) {
                     await runtime.broadcastToolInputEnd(partTC.toolCallId, "completed");
@@ -555,6 +580,7 @@ export class DefaultHarness implements HarnessInterface {
                 }
                 case "tool-result":
                 case "tool-error":
+                  attemptSawToolExecution = true;
                   emitToolResultEvent(runtime, part);
                   break;
               }
@@ -683,6 +709,17 @@ export class DefaultHarness implements HarnessInterface {
           throw err;
         }
 
+        let streamError: unknown = null;
+        for await (const part of r.fullStream) {
+          if (part.type === "error") {
+            streamError = part.error;
+          }
+        }
+
+        if (streamError) {
+          throw streamError;
+        }
+
         const finishReason = await r.finishReason;
         const finalText = await r.text;
         const toolCalls = await r.toolCalls;
@@ -706,23 +743,12 @@ export class DefaultHarness implements HarnessInterface {
         const overflow = detectContextOverflowError(err);
         if (overflow.isOverflow) {
           // Check single retry eligibility: attempt === 1, no tokens emitted, no side-effect tools started
-          if (attempt === 1 && !stepSawFirstChunk && liveToolInput.size === 0) {
+          if (attempt === 1 && !attemptSawFirstChunk && !attemptSawToolExecution) {
             console.warn(
               `[context-overflow] Provider returned context overflow (code=${overflow.providerCode ?? "?"}) on attempt 1. Retrying once with emergency pruned context...`,
             );
-            // Build emergency pruned context: keep leading summary if present + last 2 messages
-            const emergencyMessages: ModelMessage[] = [];
-            if (
-              messagesToSend.length > 0 &&
-              typeof messagesToSend[0].content === "string" &&
-              messagesToSend[0].content.includes("<conversation-summary>")
-            ) {
-              emergencyMessages.push(messagesToSend[0]);
-            }
-            const tailSlice = messagesToSend.slice(Math.max(0, messagesToSend.length - 2));
-            for (const m of tailSlice) {
-              if (!emergencyMessages.includes(m)) emergencyMessages.push(m);
-            }
+            // Build emergency pruned context: keep leading summary if present + safe tail
+            const emergencyMessages = buildEmergencyPrunedContext(messagesToSend);
             return await runStreamAttempt(emergencyMessages, 2);
           }
 
@@ -821,9 +847,16 @@ export class DefaultHarness implements HarnessInterface {
   async compact(
     events: SessionEvent[],
     runtime: HarnessRuntime,
-    ctx: { model: LanguageModel; systemPrompt: string; tools: Record<string, any> },
+    ctx: {
+      model: LanguageModel;
+      systemPrompt: string;
+      tools: Record<string, any>;
+      contextWindowTokens?: number;
+    },
   ): Promise<void> {
-    const ctxWindow = resolveContextWindowTokens(ctx.model);
+    const ctxWindow = resolveContextWindowTokens(ctx.model, {
+      context_window_tokens: ctx.contextWindowTokens,
+    });
     const result = await this.compactionStrategy.compact(events, {
       model: ctx.model,
       contextWindowTokens: ctxWindow,
@@ -892,6 +925,135 @@ export class DefaultHarness implements HarnessInterface {
 // === Token estimation + context-window resolution ===
 export { estimateMessageTokens, estimateMessagesTokens } from "./token-estimator";
 export { resolveContextWindowTokens } from "./context-window";
+
+/**
+ * Project large tool outputs only for the provider request assembled between
+ * streamText steps. The recorded StepResult remains untouched, so
+ * onStepFinish can still persist the full raw output in the durable event log.
+ */
+export function projectLargeToolResultsForProviderStep(
+  messages: ModelMessage[],
+): ModelMessage[] {
+  return messages.map((message) => {
+    if (message.role !== "tool" || !Array.isArray(message.content)) return message;
+
+    let changed = false;
+    const content = message.content.map((part) => {
+      if (part.type !== "tool-result") return part;
+      const rawContent = normalizeToolOutputForWire((part as any).output);
+      const projected = projectToolResultForModel(
+        rawContent,
+        (part as any).toolCallId,
+        (part as any).toolName,
+      );
+      if (!projected.isExternalized) return part;
+      changed = true;
+      return {
+        ...part,
+        output: { type: "text", value: projected.output },
+      };
+    });
+
+    return changed ? ({ ...message, content } as ModelMessage) : message;
+  });
+}
+
+export function buildEmergencyPrunedContext(messagesToSend: ModelMessage[]): ModelMessage[] {
+  if (messagesToSend.length === 0) return [];
+
+  const isSummaryMessage = (m: ModelMessage): boolean => {
+    if (m.role !== "user") return false;
+    if (typeof m.content === "string") {
+      return m.content.includes("<conversation-summary>");
+    }
+    if (Array.isArray(m.content)) {
+      return m.content.some(
+        (part: any) =>
+          part.type === "text" &&
+          typeof part.text === "string" &&
+          part.text.includes("<conversation-summary>"),
+      );
+    }
+    return false;
+  };
+
+  const summaryIndex = messagesToSend.findIndex(isSummaryMessage);
+  const summaryMsg = summaryIndex >= 0 ? messagesToSend[summaryIndex] : null;
+
+  // Build index maps:
+  // 1. toolCallId -> assistant message index that made the call
+  // 2. toolCallId -> array of tool message indexes containing its results
+  const toolCallToAssistant = new Map<string, number>();
+  const toolCallToResults = new Map<string, number[]>();
+
+  for (let i = 0; i < messagesToSend.length; i++) {
+    const m = messagesToSend[i];
+    if (m.role === "assistant" && Array.isArray(m.content)) {
+      for (const part of m.content) {
+        if ((part as any).type === "tool-call" && (part as any).toolCallId) {
+          toolCallToAssistant.set((part as any).toolCallId, i);
+        }
+      }
+    } else if (m.role === "tool" && Array.isArray(m.content)) {
+      for (const part of m.content) {
+        if ((part as any).type === "tool-result" && (part as any).toolCallId) {
+          const tid = (part as any).toolCallId;
+          const list = toolCallToResults.get(tid) ?? [];
+          list.push(i);
+          toolCallToResults.set(tid, list);
+        }
+      }
+    }
+  }
+
+  // Start with at least the last 2 messages (excluding leading summary if we prepend it later)
+  let startIndex = Math.max(0, messagesToSend.length - 2);
+
+  // Expand startIndex backwards until all tool-call and tool-result pairs in [startIndex, end] are complete
+  let expanded = true;
+  while (expanded) {
+    expanded = false;
+    for (let i = startIndex; i < messagesToSend.length; i++) {
+      const m = messagesToSend[i];
+      if (m.role === "tool" && Array.isArray(m.content)) {
+        for (const part of m.content) {
+          if ((part as any).type === "tool-result" && (part as any).toolCallId) {
+            const astIdx = toolCallToAssistant.get((part as any).toolCallId);
+            if (astIdx !== undefined && astIdx < startIndex) {
+              startIndex = astIdx;
+              expanded = true;
+            }
+          }
+        }
+      } else if (m.role === "assistant" && Array.isArray(m.content)) {
+        for (const part of m.content) {
+          if ((part as any).type === "tool-call" && (part as any).toolCallId) {
+            const resIndices = toolCallToResults.get((part as any).toolCallId);
+            if (resIndices) {
+              for (const rIdx of resIndices) {
+                if (rIdx < startIndex) {
+                  startIndex = rIdx;
+                  expanded = true;
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  const tailSlice: ModelMessage[] = [];
+  for (let i = startIndex; i < messagesToSend.length; i++) {
+    if (i === summaryIndex) continue;
+    tailSlice.push(messagesToSend[i]);
+  }
+
+  if (summaryMsg) {
+    return [summaryMsg, ...tailSlice];
+  }
+  return tailSlice;
+}
 
 // === Provider-specific prompt cache strategy ===
 //

@@ -10,6 +10,7 @@ export interface ModelCard {
   api_key_preview?: string; // last 4 chars only, for display
   base_url?: string;        // custom base URL (compatible providers)
   custom_headers?: Record<string, string>; // custom HTTP headers (compatible providers)
+  context_window_tokens?: number; // model context window size
   is_default?: boolean;
   created_at: string;
   updated_at?: string;
@@ -504,6 +505,8 @@ export interface SessionErrorEvent extends EventBase {
     message: string;
     retry_status?: "retryable" | "non_retryable";
   };
+  message?: string;
+  details?: unknown;
 }
 
 /**

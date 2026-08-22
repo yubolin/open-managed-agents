@@ -43,6 +43,7 @@ export interface ModelCardRow {
   /** Last-4 of the api key, safe to surface in API responses. */
   api_key_preview: string;
   is_default: boolean;
+  context_window_tokens?: number | null;
   created_at: string;
   updated_at: string | null;
   archived_at: string | null;

@@ -14,6 +14,7 @@ describe("SqlModelCardRepo PostgreSQL rows", () => {
       api_key_cipher: "cipher",
       api_key_preview: "last",
       is_default: "1",
+      context_window_tokens: "204800",
       created_at: "1785739431368",
       updated_at: "1785739432368",
       archived_at: null,
@@ -30,6 +31,7 @@ describe("SqlModelCardRepo PostgreSQL rows", () => {
 
     await expect(repo.get("tenant-pg", "mdl-pg")).resolves.toMatchObject({
       is_default: true,
+      context_window_tokens: 204800,
       created_at: "2026-08-03T06:43:51.368Z",
       updated_at: "2026-08-03T06:43:52.368Z",
     });

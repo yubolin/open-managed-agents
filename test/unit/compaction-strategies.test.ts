@@ -291,7 +291,7 @@ function buildHarnessWithStrategy(strategy: CompactionStrategy): {
 
 describe("DefaultHarness.compact() — empty-summary defense (upstream)", () => {
   const ctx = {
-    model: { modelId: "stub" } as any,
+    model: { modelId: "claude-sonnet-4-6" } as any,
     systemPrompt: "stub",
     tools: {},
   };

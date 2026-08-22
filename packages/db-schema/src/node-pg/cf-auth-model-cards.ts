@@ -25,6 +25,7 @@ export const model_cards = pgTable(
     updated_at: bigint("updated_at", { mode: "number" }),
     archived_at: bigint("archived_at", { mode: "number" }),
     model: text("model").notNull().default(""),
+    context_window_tokens: bigint("context_window_tokens", { mode: "number" }),
   },
   (t) => [
     uniqueIndex("idx_model_cards_model_id").on(t.tenant_id, t.model_id),

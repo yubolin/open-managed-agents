@@ -35,6 +35,7 @@ export const model_cards = sqliteTable(
     // PG-side (current) doesn't have this column — drift to be
     // reconciled in Phase 3 alongside the matching node-pg port.
     model: text("model").notNull().default(""),
+    context_window_tokens: integer("context_window_tokens"),
   },
   (t) => [
     // Hard UNIQUE: one model_id (handle) per tenant.

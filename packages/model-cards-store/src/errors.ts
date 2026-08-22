@@ -32,3 +32,15 @@ export class ModelCardDefaultConflictError extends Error {
     super(message);
   }
 }
+
+/**
+ * Thrown when a contextWindowTokens value fails domain validation:
+ * must be a positive safe integer of at least 1000 tokens, or null to clear.
+ */
+export class ModelCardInvalidContextWindowError extends Error {
+  readonly code = "context_window_invalid";
+  constructor(message: string) {
+    super(message);
+    this.name = "ModelCardInvalidContextWindowError";
+  }
+}

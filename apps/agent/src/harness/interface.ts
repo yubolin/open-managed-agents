@@ -53,6 +53,7 @@ export interface HarnessInterface {
       systemPrompt: string;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       tools: Record<string, any>;
+      contextWindowTokens?: number;
     },
   ): Promise<void>;
 
@@ -183,6 +184,8 @@ export interface HarnessContext {
 
   /** Platform-prepared model: resolved from agent config with API key. */
   model: LanguageModel;
+
+  contextWindowTokens?: number;
 
   /**
    * Platform-augmented system prompt: agent.system + platform guidance

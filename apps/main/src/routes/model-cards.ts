@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import type { Env } from "@open-managed-agents/shared";
 import {
   ModelCardDuplicateModelIdError,
+  ModelCardInvalidContextWindowError,
   ModelCardNotFoundError,
   type ModelCardRow,
 } from "@open-managed-agents/model-cards-store";
@@ -28,6 +29,7 @@ function toApiShape(card: ModelCardRow) {
     api_key_preview: card.api_key_preview,
     base_url: card.base_url ?? undefined,
     custom_headers: card.custom_headers ?? undefined,
+    context_window_tokens: card.context_window_tokens ?? undefined,
     is_default: card.is_default,
     created_at: card.created_at,
     updated_at: card.updated_at ?? undefined,
@@ -134,6 +136,7 @@ app.post("/", async (c) => {
     api_key: string;
     base_url?: string;
     custom_headers?: Record<string, string>;
+    context_window_tokens?: number;
     is_default?: boolean;
   }>();
 
@@ -149,6 +152,7 @@ app.post("/", async (c) => {
       apiKey: body.api_key,
       baseUrl: body.base_url ?? null,
       customHeaders: body.custom_headers ?? null,
+      contextWindowTokens: body.context_window_tokens ?? null,
       makeDefault: !!body.is_default,
     });
     // Probe the model with a minimal request so the user finds out NOW
@@ -165,6 +169,9 @@ app.post("/", async (c) => {
     });
     return c.json({ ...toApiShape(card), probe }, 201);
   } catch (err) {
+    if (err instanceof ModelCardInvalidContextWindowError) {
+      return c.json({ error: err.code, message: err.message }, 400);
+    }
     if (err instanceof ModelCardDuplicateModelIdError) {
       return c.json({ error: err.message }, 409);
     }
@@ -269,6 +276,7 @@ app.post("/:id", async (c) => {
     api_key?: string;
     base_url?: string | null;
     custom_headers?: Record<string, string> | null;
+    context_window_tokens?: number | null;
     is_default?: boolean;
   }>();
   try {
@@ -285,11 +293,15 @@ app.post("/:id", async (c) => {
       customHeaders: body.custom_headers === undefined
         ? undefined
         : (body.custom_headers || null),
+      contextWindowTokens: body.context_window_tokens,
       apiKey: body.api_key,
       isDefault: body.is_default,
     });
     return c.json(toApiShape(updated));
   } catch (err) {
+    if (err instanceof ModelCardInvalidContextWindowError) {
+      return c.json({ error: err.code, message: err.message }, 400);
+    }
     if (err instanceof ModelCardNotFoundError) {
       return c.json({ error: "Model card not found" }, 404);
     }

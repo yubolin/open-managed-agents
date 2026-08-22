@@ -525,6 +525,7 @@ async function resolveNodeModelCreds(
   baseURL?: string;
   apiCompat?: "ant" | "ant-compatible" | "oai" | "oai-compatible";
   customHeaders?: Record<string, string>;
+  contextWindowTokens?: number;
 }> {
   const handle = typeof agentModel === "string" ? agentModel : agentModel.id;
   try {
@@ -544,6 +545,7 @@ async function resolveNodeModelCreds(
           baseURL: card.base_url ?? undefined,
           apiCompat,
           customHeaders: card.custom_headers ?? undefined,
+          contextWindowTokens: card.context_window_tokens ?? undefined,
         };
       }
     }
@@ -648,6 +650,7 @@ const sessionRegistry = new SessionRegistry({
         ...feishuTools,
       } as HarnessContext["tools"],
       model: input.model,
+      contextWindowTokens: creds.contextWindowTokens,
       systemPrompt: composeSystemPrompt(rawSystemPrompt, reminders),
       rawSystemPrompt,
       platformReminders: reminders,

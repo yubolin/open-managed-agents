@@ -11,6 +11,7 @@ export function getSandbox() {
     readFile: async () => ({ content: "" }),
     writeFile: async () => {},
     mkdir: async () => {},
+    exists: async (path) => ({ success: true, exists: true, path, timestamp: "" }),
   };
 }
 export function proxyToSandbox() {

@@ -14,10 +14,10 @@ ALLOW_DIRTY="${ALLOW_DIRTY:-0}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-# Safety gate: verify clean git working tree unless explicitly bypassed
+# Safety gate: verify clean git working tree (including untracked files) unless explicitly bypassed
 if [ "${ALLOW_DIRTY}" != "1" ]; then
-  if ! git -C "${REPO_ROOT}" diff-index --quiet HEAD --; then
-    echo "❌ Error: Working tree has uncommitted changes. Commit or stash them first, or pass ALLOW_DIRTY=1." >&2
+  if [ -n "$(git -C "${REPO_ROOT}" status --porcelain)" ]; then
+    echo "❌ Error: Working tree has uncommitted or untracked changes. Commit or stash them first, or pass ALLOW_DIRTY=1." >&2
     git -C "${REPO_ROOT}" status --short
     exit 1
   fi
@@ -56,13 +56,8 @@ rsync -avz --delete -e "ssh ${SSH_OPTS}" \
   --exclude '.idea' \
   --exclude 'coverage' \
   --exclude '.pnpm-store' \
+  --exclude '.version*' \
   "${REPO_ROOT}/" "${SERVER_USER}@${SERVER_HOST}:${TARGET_DIR}/"
-
-# Write deploy version stamp
-ssh ${SSH_OPTS} "${SERVER_USER}@${SERVER_HOST}" "
-  echo 'GIT_COMMIT_SHA=${GIT_SHA}' > ${TARGET_DIR}/.version
-  echo 'DEPLOYED_AT=$(date -u +'%Y-%m-%dT%H:%M:%SZ')' >> ${TARGET_DIR}/.version
-"
 
 echo "🐳 [3/4] Building and starting Docker Compose containers on ${SERVER_HOST}..."
 ssh ${SSH_OPTS} "${SERVER_USER}@${SERVER_HOST}" "
@@ -91,6 +86,15 @@ if [ "${READY}" -ne 1 ]; then
   ssh ${SSH_OPTS} "${SERVER_USER}@${SERVER_HOST}" "cd ${TARGET_DIR} && docker compose -f docker-compose.postgres.yml logs --tail 50 oma-server"
   exit 1
 fi
+
+# Atomically publish deploy version stamp only after health check passes
+echo "📝 Publishing deploy version stamp..."
+ssh ${SSH_OPTS} "${SERVER_USER}@${SERVER_HOST}" "
+  TMP_VER=\"\$(mktemp ${TARGET_DIR}/.version.tmp.XXXXXX)\"
+  echo 'GIT_COMMIT_SHA=${GIT_SHA}' > \"\${TMP_VER}\"
+  echo \"DEPLOYED_AT=\$(date -u +'%Y-%m-%dT%H:%M:%SZ')\" >> \"\${TMP_VER}\"
+  mv -f \"\${TMP_VER}\" ${TARGET_DIR}/.version
+"
 
 echo "=============================================================================="
 echo "✅ OpenMA successfully deployed and verified healthy on ${SERVER_HOST}!"

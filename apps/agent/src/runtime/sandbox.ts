@@ -366,6 +366,29 @@ export class CloudflareSandbox implements SandboxExecutor {
     }
   }
 
+  async fileExists(path: string): Promise<boolean> {
+    const sandbox = await this.getSandbox();
+    if (typeof sandbox.exists !== "function") {
+      throw new Error(`fileExists(${path}) failed: sandbox does not support exists()`);
+    }
+    try {
+      const result = await sandbox.exists(path);
+      if (!result || typeof result !== "object") {
+        throw new Error(`SDK returned malformed response: ${JSON.stringify(result)}`);
+      }
+      if (result.success === false) {
+        throw new Error(`SDK returned success=false: ${JSON.stringify(result)}`);
+      }
+      if (typeof result.exists !== "boolean") {
+        throw new Error(`SDK returned invalid exists property: ${JSON.stringify(result)}`);
+      }
+      return result.exists;
+    } catch (err: any) {
+      console.warn(`[sandbox.fileExists] FAILED path=${path} err=${err?.message || err}`);
+      throw new Error(`fileExists(${path}) failed: ${err?.message || err}`);
+    }
+  }
+
   async writeFileBytes(path: string, bytes: Uint8Array): Promise<string> {
     const sandbox = await this.getSandbox();
     // Encode to base64 client-side and ask the sandbox to decode. Avoids any

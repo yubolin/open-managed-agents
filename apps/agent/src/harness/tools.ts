@@ -175,13 +175,23 @@ async function pollWithStrategies(
  * converts for the AI SDK.
  */
 type ToolResultValue = string | Record<string, unknown>;
-function safe<T>(fn: (args: T) => Promise<ToolResultValue>): (args: T) => Promise<ToolResultValue> {
-  return async (args: T) => {
+function safe<T>(
+  sandbox: SandboxExecutor | undefined,
+  fn: (args: T) => Promise<ToolResultValue>
+): (args: T, options?: { toolCallId?: string }) => Promise<ToolResultValue> {
+  return async (args: T, options?: { toolCallId?: string }) => {
     try {
       const result = await fn(args);
       // Handle empty string results (CC pattern: prevent model stop sequence issues)
-      if (typeof result === "string" && result.trim() === "") return "(completed with no output)";
-      return result;
+      let out = result;
+      if (typeof out === "string" && out.trim() === "") {
+        out = "(completed with no output)";
+      }
+      const rawText = typeof out === "string" ? out : JSON.stringify(out ?? "");
+      if (rawText.length > MAX_INLINE_RESULT_CHARS && sandbox && options?.toolCallId) {
+        await materializeToolResultToWorkspace(sandbox, options.toolCallId, rawText);
+      }
+      return out;
     } catch (err) {
       let msg = err instanceof Error ? err.message : String(err);
       // Include stack trace for better debugging
@@ -534,7 +544,7 @@ export async function buildTools(
           .optional()
           .describe("Timeout in milliseconds (default 120000, max 600000)"),
       }),
-      execute: safe(async ({ command, timeout }) => {
+      execute: safe(sandbox, async ({ command, timeout }) => {
         const timeoutMs = Math.min(timeout || DEFAULT_BASH_TIMEOUT, MAX_BASH_TIMEOUT);
 
         // Auto-background-on-timeout was REMOVED 2026-05-13. The
@@ -573,7 +583,7 @@ export async function buildTools(
         offset: z.number().optional().describe("1-based line number to start reading from (text only)"),
         limit: z.number().optional().describe("Number of lines to read (text only)"),
       }),
-      execute: safe(async ({ file_path, offset, limit }) => {
+      execute: safe(sandbox, async ({ file_path, offset, limit }) => {
         const ext = file_path.split(".").pop()?.toLowerCase() || "";
         const imageMedia = IMAGE_EXTENSIONS[ext];
         const docMedia = DOCUMENT_EXTENSIONS[ext];
@@ -648,7 +658,7 @@ export async function buildTools(
         file_path: z.string().describe("The absolute file path to write to, e.g. /workspace/index.html"),
         content: z.string().describe("The complete file content to write"),
       }),
-      execute: safe(async ({ file_path, content }) => sandbox.writeFile(file_path, content)),
+      execute: safe(sandbox, async ({ file_path, content }) => sandbox.writeFile(file_path, content)),
     });
   }
 
@@ -664,7 +674,7 @@ export async function buildTools(
         new_string: z.string().describe("Replacement string"),
         replace_all: z.boolean().optional().describe("Replace all occurrences (default false)"),
       }),
-      execute: safe(async ({ file_path, old_string, new_string, replace_all }) => {
+      execute: safe(sandbox, async ({ file_path, old_string, new_string, replace_all }) => {
         const content = await sandbox.readFile(file_path);
         if (!content.includes(old_string)) {
           return "Error: old_string not found in file";
@@ -697,7 +707,7 @@ export async function buildTools(
           .optional()
           .describe("Directory to search in (defaults to /workspace)"),
       }),
-      execute: safe(async ({ pattern, path }) => {
+      execute: safe(sandbox, async ({ pattern, path }) => {
         const dir = path || "/workspace";
         // Walk dir + match glob via bash, then sort by mtime desc, take head 250
         const cmd =
@@ -742,7 +752,7 @@ export async function buildTools(
         multiline: z.boolean().optional().describe("Enable multiline mode (. matches newlines, patterns can span lines)"),
         head_limit: z.number().optional().describe("Limit output to first N lines/entries (default 250; pass 0 for unlimited)"),
       }),
-      execute: safe(async (args) => {
+      execute: safe(sandbox, async (args) => {
         const pattern = args.pattern;
         const dir = args.path || "/workspace";
         const mode = args.output_mode || "files_with_matches";
@@ -845,7 +855,7 @@ export async function buildTools(
           .optional()
           .describe("Truncate returned markdown to this many chars (default 50000)"),
       }),
-      execute: safe(async ({ url, max_length }) => {
+      execute: safe(sandbox, async ({ url, max_length }) => {
         // Networking restriction enforcement (limited mode)
         if (env?.environmentConfig?.networking?.type === "limited") {
           const allowedHosts = env.environmentConfig.networking.allowed_hosts || [];
@@ -1051,7 +1061,7 @@ export async function buildTools(
           (v) => [v.delay_seconds, v.at, v.cron].filter((x) => x != null).length === 1,
           "Provide exactly one of delay_seconds | at | cron",
         ),
-      execute: safe(async (args) => env.scheduleWakeup!(args)),
+      execute: safe(sandbox, async (args) => env.scheduleWakeup!(args)),
     });
   }
 
@@ -1063,7 +1073,7 @@ export async function buildTools(
       inputSchema: z.object({
         id: z.string().min(1).describe("Schedule id returned by the schedule tool"),
       }),
-      execute: safe(async ({ id }) => env.cancelWakeup!(id)),
+      execute: safe(sandbox, async ({ id }) => env.cancelWakeup!(id)),
     });
   }
 
@@ -1072,7 +1082,7 @@ export async function buildTools(
       description:
         "List all pending wakeup schedules for THIS session: id, fire_at, cron (if recurring), prompt, kind.",
       inputSchema: z.object({}),
-      execute: safe(async () => ({ schedules: env.listWakeups!() })),
+      execute: safe(sandbox, async () => ({ schedules: env.listWakeups!() })),
     });
   }
 
@@ -1095,7 +1105,7 @@ export async function buildTools(
       inputSchema: z.object({
         q: z.string().max(200).optional().describe("Search query (optional — omit to list registry skills)"),
       }),
-      execute: safe(async ({ q }) => {
+      execute: safe(sandbox, async ({ q }) => {
         const res = await env.skillRpc!.skillSearch({ tenantId: env.tenantId || "", q });
         // `in`-narrowing: status alone doesn't discriminate the union
         // (the error variant's status is `number`, which admits 200).
@@ -1131,7 +1141,7 @@ export async function buildTools(
           .refine((v) => v !== "latest", "version 'latest' is forbidden; pass an explicit version pin")
           .describe("Explicit version pin (never 'latest')"),
       }),
-      execute: safe(async ({ slug, version }) => {
+      execute: safe(sandbox, async ({ slug, version }) => {
         const res = await env.skillRpc!.skillInstall({
           tenantId: env.tenantId || "",
           slug,
@@ -1177,7 +1187,7 @@ export async function buildTools(
           .regex(/^[0-9a-f]{64}$/, "hash must be the sha256 hex returned by install_skill")
           .describe("sha256 hash from install_skill — re-checked platform-side"),
       }),
-      execute: safe(async ({ agent_id, skill_id, version, hash }) => {
+      execute: safe(sandbox, async ({ agent_id, skill_id, version, hash }) => {
         const res = await env.skillRpc!.skillAttach({
           tenantId: env.tenantId || "",
           agentId: agent_id,
@@ -1217,7 +1227,7 @@ export async function buildTools(
         query: z.string().describe("Search query"),
         max_results: z.number().optional().describe("Max results (default 5)"),
       }),
-      execute: safe(async ({ query, max_results }) => {
+      execute: safe(sandbox, async ({ query, max_results }) => {
         if (!tavilyKey)
           return "web_search unavailable: TAVILY_API_KEY not configured";
         const res = await fetch("https://api.tavily.com/search", {
@@ -1250,7 +1260,7 @@ export async function buildTools(
         query: z.string().describe("Search query"),
         max_results: z.number().optional().describe("Max results (default 5)"),
       }),
-      execute: safe(async ({ query, max_results }) => {
+      execute: safe(sandbox, async ({ query, max_results }) => {
         const count = max_results || 5;
         // Step 1: Get VQD token from DuckDuckGo
         const vqdRes = await fetch(`https://duckduckgo.com/?${new URLSearchParams({ q: query, ia: "web" })}`);
@@ -1404,7 +1414,7 @@ export async function buildTools(
                   const rawText = typeof result === "string" ? result : JSON.stringify(result ?? "");
                   if (rawText.length > MAX_INLINE_RESULT_CHARS && sandbox) {
                     const toolCallId = context?.toolCallId ?? `call_${Date.now()}`;
-                    void materializeToolResultToWorkspace(sandbox, toolCallId, rawText);
+                    await materializeToolResultToWorkspace(sandbox, toolCallId, rawText);
                   }
                   return result;
                 },
@@ -1441,7 +1451,7 @@ export async function buildTools(
         inputSchema: z.object({
           message: z.string().describe("The task to delegate"),
         }),
-        execute: safe(async ({ message }) => {
+        execute: safe(sandbox, async ({ message }) => {
           if (!env?.delegateToAgent) {
             return "Multi-agent delegation not available: no thread executor configured";
           }
@@ -1479,7 +1489,7 @@ export async function buildTools(
               "produce — the sub-agent gets only this string and returns text.",
           ),
       }),
-      execute: safe(async ({ task }) => {
+      execute: safe(sandbox, async ({ task }) => {
         if (!env?.delegateToAgent) {
           return "general sub-agent unavailable: no thread executor configured";
         }

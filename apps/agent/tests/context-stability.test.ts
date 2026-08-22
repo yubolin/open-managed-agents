@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   detectContextOverflowError,
+  buildEmergencyPrunedContext,
 } from "../src/harness/default-loop";
 import {
   resolveContextWindowTokens,
@@ -151,6 +152,90 @@ describe("context-stability & large result governance (SDS v0.4 replay)", () => 
         expect(json.workspace_path).toBe(`/workspace/.mcp/call_mcp_doc${i + 1}.txt`);
         expect(json.sha256).toMatch(/^[0-9a-f]{64}$/);
       }
+    });
+  });
+
+  describe("buildEmergencyPrunedContext", () => {
+    it("preserves conversation summary with real array content block shape [{type: 'text', text: '...'}]", () => {
+      const msgs: any[] = [
+        { role: "user", content: [{ type: "text", text: "<conversation-summary>\nPrior summary text\n</conversation-summary>" }] },
+        { role: "user", content: "old message 1" },
+        { role: "assistant", content: "old message 2" },
+        { role: "user", content: "recent user message" },
+        { role: "assistant", content: "recent assistant reply" },
+      ];
+      const pruned = buildEmergencyPrunedContext(msgs);
+      expect(pruned.length).toBe(3);
+      expect(pruned[0].role).toBe("user");
+      expect(Array.isArray(pruned[0].content)).toBe(true);
+      expect((pruned[0].content as any[])[0].text).toContain("<conversation-summary>");
+      expect(pruned[1].role).toBe("user");
+      expect(pruned[1].content).toBe("recent user message");
+      expect(pruned[2].role).toBe("assistant");
+      expect(pruned[2].content).toBe("recent assistant reply");
+    });
+
+    it("preserves complete assistant tool-call plus multiple matching tool result messages and trailing messages", () => {
+      const msgs: any[] = [
+        { role: "user", content: [{ type: "text", text: "<conversation-summary>summary</conversation-summary>" }] },
+        { role: "user", content: "old question" },
+        { role: "assistant", content: "old answer" },
+        {
+          role: "assistant",
+          content: [
+            { type: "tool-call", toolCallId: "call_1", toolName: "read", args: { path: "a.txt" } },
+            { type: "tool-call", toolCallId: "call_2", toolName: "read", args: { path: "b.txt" } },
+          ],
+        },
+        {
+          role: "tool",
+          content: [{ type: "tool-result", toolCallId: "call_1", output: { type: "text", value: "content a" } }],
+        },
+        {
+          role: "tool",
+          content: [{ type: "tool-result", toolCallId: "call_2", output: { type: "text", value: "content b" } }],
+        },
+        { role: "assistant", content: "Based on both files, here is the answer." },
+        { role: "user", content: "Great, now do step 2." },
+      ];
+      const pruned = buildEmergencyPrunedContext(msgs);
+      // Last 2 messages are: assistant ("Based on..."), user ("Great, now...")
+      // They don't have tool results, so they don't drag earlier tool calls.
+      expect(pruned.length).toBe(3);
+      expect(pruned[0].role).toBe("user");
+      expect((pruned[0].content as any[])[0].text).toContain("<conversation-summary>");
+      expect(pruned[1].content).toBe("Based on both files, here is the answer.");
+      expect(pruned[2].content).toBe("Great, now do step 2.");
+    });
+
+    it("expands to include assistant tool-call message when tool-result messages are in the tail", () => {
+      const msgs: any[] = [
+        { role: "user", content: [{ type: "text", text: "<conversation-summary>summary</conversation-summary>" }] },
+        { role: "user", content: "old question" },
+        { role: "assistant", content: "old answer" },
+        {
+          role: "assistant",
+          content: [
+            { type: "tool-call", toolCallId: "call_1", toolName: "write", args: {} },
+            { type: "tool-call", toolCallId: "call_2", toolName: "bash", args: {} },
+          ],
+        },
+        {
+          role: "tool",
+          content: [
+            { type: "tool-result", toolCallId: "call_1", output: { type: "text", value: "ok" } },
+            { type: "tool-result", toolCallId: "call_2", output: { type: "text", value: "done" } },
+          ],
+        },
+      ];
+      const pruned = buildEmergencyPrunedContext(msgs);
+      // Last message is the tool results message. It MUST pull in the assistant message that issued call_1 & call_2!
+      expect(pruned.length).toBe(3);
+      expect(pruned[0].role).toBe("user");
+      expect((pruned[0].content as any[])[0].text).toContain("<conversation-summary>");
+      expect(pruned[1].role).toBe("assistant");
+      expect((pruned[1].content as any[])[0].toolCallId).toBe("call_1");
+      expect(pruned[2].role).toBe("tool");
     });
   });
 });
