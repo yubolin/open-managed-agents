@@ -1,8 +1,10 @@
 # 飞书知识库搜索能力演进 — P1 SDS
 
-> 状态：**v0.2（Revised Draft / 架构选型与部署拓扑）**
+> 状态：**v0.3（Revised Draft / No-go / 有界检索结果契约）**
+>
 > 来源：基于生产使用中“用户期望按关键词检索知识库，而 P0 只能枚举节点和阅读全文”的痛点演进。
-> 定位：在 P0 指定知识空间浏览直达连接器（见 [feishu-kb-p0-sds.md](./feishu-kb-p0-sds.md)）的基础上，构建**低延迟、高召回、具备强租户权限隔离的飞书知识库检索能力**。
+>
+> 定位：在 P0 指定知识空间浏览直达连接器（见 [feishu-kb-p0-sds.md](./feishu-kb-p0-sds.md)）的基础上，构建低延迟、高召回、具备可验证租户与权限隔离的飞书知识库检索能力。
 
 ---
 
@@ -26,38 +28,38 @@
 
 ```
 ───────────────────────────────────────────────────────────────────────────────
-拓扑 A：Sidecar 内存并发空间树缓存与标题搜索 (P1-Lite)
+拓扑 A：自有 Search MCP 空间树缓存与标题搜索 (P1-Lite)
 ───────────────────────────────────────────────────────────────────────────────
 
   ┌──────────────┐ Streamable HTTP ┌────────────────────────┐ tenant_token ┌─────────────┐
-  │  oma-server  │ ───────────────▶│  oma-lark-mcp           │ ────────────▶│ open.feishu │
+  │  oma-server  │ ───────────────▶│  oma-feishu-search      │ ────────────▶│ open.feishu │
   │ (main-node)  │  /mcp (内网)     │  • 内存并发 Space 树缓存 │              │  .cn /apis   │
   └──────────────┘                 │  • 暴露 wiki_search     │              └─────────────┘
                                    └────────────────────────┘
-  • 部署位置：oma-lark-mcp 容器内部
-  • 凭证来源：/run/secrets/lark-mcp-config（Docker secret）
-  • 租户边界：由该 Sidecar 绑定的单一 AppID 物理锁定，零跨租户风险
+  • 部署位置：新增 oma-feishu-search 服务；P0 oma-lark-mcp 保持不变
+  • 凭证来源：Search 服务专属 Docker secret，不进入 main-node/Agent/索引表
+  • 飞书边界：每个 Search 服务实例固定绑定单一 AppID/Feishu tenant
+  • OMA 边界：仍须证明该 Sidecar 只服务对应 OMA tenant，不能据此宣称零跨租户风险
 
 ───────────────────────────────────────────────────────────────────────────────
 拓扑 B：平台级全文本地 RAG 搜索 (P1-Pro)
 ───────────────────────────────────────────────────────────────────────────────
 
-  ┌───────────────────────────────────────────────────────────────────────────┐
-  │ oma-server (apps/main-node)                                               │
-  │                                                                           │
-  │  1. In-process Tool: search_feishu_kb(query, space_id?)                   │
-  │  2. Background Sync Worker: 定时拉取 docx 正文切片入库                    │
-  │  3. 数据库检索:                                                            │
-  │     • PostgreSQL 原生全文检索: tsvector + tsquery + ts_rank_cd            │
-  │     • 可选向量检索: pgvector 扩展 (需 pgvector/pgvector 专用镜像)          │
-  └─────────────────────────────────────┬─────────────────────────────────────┘
-                                        │
-                                        ▼ SQL 物理隔离
+  ┌─────────────────────────────┐              ┌──────────────────────────────┐
+  │ oma-feishu-search           │              │ oma-server / main-node       │
+  │ • 持有 Feishu App secret    │              │ • 不持有 Feishu App secret   │
+  │ • 拉取节点/正文/ACL         │              │ • in-process search tool     │
+  │ • 写 chunks/tombstones      │              │ • 可信 tenant context 查询   │
+  └──────────────┬──────────────┘              └──────────────┬───────────────┘
+                 │ least-privilege write                       │ tenant-bound read
+                 └──────────────────────┬───────────────────────┘
+                                        ▼
   ┌───────────────────────────────────────────────────────────────────────────┐
   │ PostgreSQL (oma 数据库)                                                    │
   │ 表: feishu_kb_chunks                                                      │
   │ 主键/约束: (tenant_id, space_id, doc_token, chunk_index)                  │
-  │ 索引: CREATE INDEX ON feishu_kb_chunks USING GIN(to_tsvector('simple',...))│
+  │ 索引: GIN(title/content gin_trgm_ops)，启用前验证 pg_trgm 扩展             │
+  │ 隔离: 服务端 tenant context + SQL tenant filter + RLS/等价防线            │
   └───────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -67,19 +69,55 @@
 
 | 评估维度 | 方案 A：用户 OAuth 原生搜索 | 方案 B：Sidecar 空间树并发检索 (拓扑 A, P1-Lite) | 方案 C：平台级 PG 全文与向量检索 (拓扑 B, P1-Pro) |
 |---|---|---|---|
-| **核心机制** | 引入用户 OAuth 凭证，调用官方 `wiki.v1.node.search` 与 `docx.builtin.search` | 在 `oma-lark-mcp` Sidecar 内维护内存 Space 树缓存（TTL 10min），收到 query 后并发分级匹配节点标题与路径 | `oma-server` 后台 Worker 增量分块入库，利用 PostgreSQL 原生 `tsvector/ts_rank_cd`（及可选 `pgvector`）执行混合检索 |
+| **核心机制** | 引入用户 OAuth 凭证，调用官方搜索能力（实际 API 与权限须在 Spike 中验证） | 在自有 `oma-feishu-search` 中维护 Space 树缓存，按标题与路径匹配 | 同一 Search 服务同步分块与 ACL/tombstone，main-node 只查询本地索引；以 `pg_trgm` 候选召回 + 应用层排序为中文基线，可选中文分词/向量增强 |
 | **搜索粒度** | 飞书官方全功能正文与节点搜索 | 节点标题、路径名模糊搜索（精准直达 node_token） | 文档段落级（Chunk-level）正文深搜与语义召回 |
-| **凭证与身份** | 需要用户身份（`user_access_token`） | 维持现有应用身份（`tenant_access_token`），零权限扩散 | 维持现有应用身份（`tenant_access_token`），零权限扩散 |
-| **技术复杂度** | 🔴 **极高**（Docker 容器无法交互式 OAuth，需自研 Token 轮转与代理注入，多租户改造深） | 🟢 **极低**（仅在 sidecar 内部增加并发缓存与匹配逻辑，1 天内闭环） | 🟡 **中等**（利用已有 Postgres 数据库原生 FTS 能力，无需外部向量服务即可启动） |
-| **数据库要求** | 无本地存储要求 | 纯内存缓存，无额外 DB 要求 | 原生 PG 即可使用 FTS；若启用向量需 `pgvector` 扩展支持 |
-| **飞书权限隔离** | 由飞书服务端自动按用户权限过滤 | 仅能检索被授予给该 App 的空间/文档（物理隔离） | 强租户隔离：SQL 显式带 `tenant_id` 过滤 |
+| **凭证与身份** | 需要用户身份（`user_access_token`） | 维持应用身份（`tenant_access_token`），不增加用户 OAuth 权限 | Search 服务持有应用身份；main-node 与索引表不接触 App Secret |
+| **技术复杂度** | 🔴 **高**（需用户授权、Token 轮转与多租户代理） | 🟡 **中低**（需新增自有 Search MCP，不能仅改 whitelist） | 🟡 **中高**（需同步、撤权、删除、中文检索与索引运维） |
+| **数据库要求** | 无本地存储要求 | 纯内存缓存，无额外 DB 要求 | 目标 PG 镜像必须验证 `pg_trgm`；若启用向量需包含 `pgvector` 的受控镜像 |
+| **飞书权限隔离** | 由飞书服务端按用户权限过滤 | 只能读取授予 App 的空间/文档，但仍需 OMA tenant 到 Search 实例的可信绑定 | SQL 必须带可信 `tenant_id`，并持续同步飞书 ACL/删除状态 |
 
 ---
 
 ## 4. 推荐演进路线与工具定义
 
+### 4.0 与 Harness 上下文治理的强制契约
+
+搜索的目标不是“更快地把全文交给模型”，而是把检索结果限制为**小而可追溯的候选片段**。本 SDS 与 [Harness 运行时上下文稳定性与大结果治理 SDS](../harness-context-stability-sds.md) 共同约束如下：
+
+- `wiki_search_nodes` 只返回标题、路径、节点标识和匹配证据，不返回文档全文；
+- `search_content` 默认 `top_k = 3`、服务端最大值 `5`，每个命中片段受独立 Token 预算约束，最终序列化响应总量不得超过服务端 `max_response_tokens`；
+- `NodeSearchHit` 必须带 `space_id`、`node_token`、`title`、`parent_path`、`matched_fields` 和 `updated_at`；
+- `ContentSearchHit` 才要求 `doc_token`、`section_path`、`chunk_index`、`snippet` 和 lexical score；只有向量能力真实启用时才返回 vector score；
+- 若用户需要全文，Agent 必须显式调用读取工具；Harness 仍会对该结果执行大结果首入治理，搜索工具不得绕过；
+- 工具在预算内优先减少 `top_k` 或缩短 snippet，并返回 `truncated: true` 与 `next_cursor`，不得静默截断或退化为整篇原文。
+- Search MCP 自身设置服务端 hard cap；调用方可传 `max_result_tokens` 进一步收紧，但服务端始终执行 `min(requested, configured_cap)`。若当前 MCP transport 尚不能安全传递 Harness 动态预算，则先使用服务端固定上限，不信任模型自行选择无限预算。Harness 对返回值再执行第二层 admission guard。
+
+建议的 `ContentSearchResponse` 形状：
+
+```json
+{
+  "query": "SDS 全称",
+  "top_k": 3,
+  "truncated": false,
+  "results": [
+    {
+      "space_id": "spc_xxx",
+      "doc_token": "dox_xxx",
+      "title": "Harness Context Stability SDS",
+      "section_path": "1.2 Terminology",
+      "chunk_index": 4,
+      "snippet": "SDS means Software Design Specification ...",
+      "scores": { "lexical": 0.83 },
+      "updated_at": 1787356800000
+    }
+  ]
+}
+```
+
 ### 4.1 阶段一（P1-Lite 即时见效）：Sidecar 空间树快速索引与标题检索
-为 `oma-lark-mcp` 补充高并发空间树检索工具：`mcp__feishu-kb__wiki_search_nodes`。
+由新增的 `oma-feishu-search` 暴露空间树检索工具：`mcp__feishu-kb__wiki_search_nodes`。
+
+当前容器运行的是官方 `@larksuiteoapi/lark-mcp` CLI，不能仅靠 whitelist 配置新增自定义工具。v0.3 固定选择**新增 OpenMA 自有 `oma-feishu-search` 服务**，由它调用飞书 API 并暴露 `wiki_search_nodes`；不修改官方 P0 sidecar，也不采用长期维护 lark-mcp fork。该服务未实现前，不得把“在现有 sidecar 内补一个工具”计为已具备能力。
 - **工具定义**：
   ```json
   {
@@ -89,40 +127,80 @@
       "type": "object",
       "properties": {
         "query": { "type": "string", "description": "Keyword to search in document titles and node paths" },
-        "space_id": { "type": "string", "description": "Optional: limit search to a specific space" }
+        "space_id": { "type": "string", "description": "Optional: limit search to a specific space" },
+        "top_k": { "type": "integer", "minimum": 1, "maximum": 20, "default": 10 },
+        "cursor": { "type": "string", "description": "Opaque signed continuation cursor" },
+        "max_result_tokens": { "type": "integer", "minimum": 128, "description": "Caller may lower, never raise, the server cap" }
       },
       "required": ["query"]
     }
   }
   ```
-- **执行收益**：Agent 搜索关键词时，仅需 1 次工具调用（耗时 <500ms）即可定位到目标文档的 `node_token`，再精准读取该文档，彻底消除目录递归遍历。
+- **执行收益目标**：热缓存下通过一次搜索调用返回候选 `node_token`，再按需读取目标文档；延迟与召回率以第 5 节基准测试为准，不在设计阶段承诺未经测量的 `<500ms`。
 
 ### 4.2 阶段二（P1-Pro 深度检索）：平台级文档切片与 PG 全文/混合检索
+- PostgreSQL 内置 `simple` FTS 不提供中文分词，不能将 `to_tsvector('simple', content)` 宣称为中文 BM25/全文检索方案。P1-Pro 基线使用经目标镜像验证的 `pg_trgm` 做标题与正文候选召回，再由应用层排序；中文分词 FTS 与向量召回均为独立可选能力。
 - **数据表设计**：
   ```sql
+  CREATE EXTENSION IF NOT EXISTS pg_trgm;
+
   CREATE TABLE feishu_kb_chunks (
     id TEXT PRIMARY KEY,
     tenant_id TEXT NOT NULL,
     space_id TEXT NOT NULL,
+    node_token TEXT NOT NULL,
     doc_token TEXT NOT NULL,
     title TEXT NOT NULL,
+    section_path TEXT NOT NULL,
     chunk_index INT NOT NULL,
     content TEXT NOT NULL,
-    tsv tsvector GENERATED ALWAYS AS (to_tsvector('simple', content)) STORED,
-    updated_at BIGINT NOT NULL,
+    source_updated_at BIGINT NOT NULL,
+    acl_version TEXT,
+    last_permission_verified_at BIGINT NOT NULL,
+    acl_valid_until BIGINT NOT NULL,
+    deleted_at BIGINT,
     CONSTRAINT uq_chunk UNIQUE (tenant_id, doc_token, chunk_index)
   );
-  CREATE INDEX idx_kb_chunks_tsv ON feishu_kb_chunks USING GIN(tsv);
+  CREATE INDEX idx_kb_chunks_title_trgm ON feishu_kb_chunks
+    USING GIN(title gin_trgm_ops);
+  CREATE INDEX idx_kb_chunks_content_trgm ON feishu_kb_chunks
+    USING GIN(content gin_trgm_ops);
   CREATE INDEX idx_kb_chunks_tenant ON feishu_kb_chunks (tenant_id, space_id);
   ```
-- **执行收益**：直接返回最相关的 2~3 个正文段落（几百 tokens），Agent 无需再将数十万字文档全文读入上下文。
+- 目标 PostgreSQL 镜像必须先执行 `CREATE EXTENSION pg_trgm` 的部署验证；若启用向量检索，则必须改用包含 pgvector 的受控镜像并单独迁移，`postgres:16-alpine` 本身不能视为已具备 pgvector。
+- 同步 Worker 运行在 `oma-feishu-search`，从专属 Docker secret 获取 App 凭证，并使用只允许写 `feishu_kb_*` 表的数据库角色。服务实例启动时固定 `OMA_TENANT_ID + AppID` 绑定，模型输入、MCP 参数和 main-node 请求均不能覆盖该绑定。
+- 同步协议必须支持分页全量基线、`source_updated_at` 增量水位、删除 tombstone、ACL 水位更新与幂等重放。一次同步只有在同一 generation 的 chunks/tombstones/ACL 水位提交完成后才发布新 `index_generation`；失败 generation 不对查询端可见。
+- P1-Pro 采用 `main-node` in-process tool：认证路由将可信 `tenant_id` 写入服务端调用上下文，repository 强制 tenant filter，并用 PostgreSQL RLS 或等价的不可绕过防线做纵深保护；模型参数中不存在可覆盖 tenant 的字段。
+- **执行收益目标**：直接返回最相关的少量正文片段，Agent 无需再将整篇文档读入上下文。
 
 ---
 
 ## 5. 验收准则与 TDD 规范
 
 1. **P1-Lite 检索延时与准确率**：
-   - 在包含 100+ 节点的空间中搜索关键词，`wiki_search_nodes` 响应时间 `< 800ms`；
-   - 能够精准返回包含关键词的节点 `node_token`、`title` 与 `parent_path`。
+   - 分开测量冷启动构树与热缓存查询；在固定 100、1,000、10,000 节点数据集上记录 P50/P95/P99，不混用 `<500ms` 与 `<800ms` 两套口径；
+   - 用标注语料分别统计中文、英文、中英混合、缩写和路径标题查询的 Recall@K 与 MRR，目标值在 Spike 后冻结。
 2. **多租户数据隔离测试**：
-   - 租户 A 与租户 B 分别搜索时，断言任何检索结果均严格限制在请求携带的 `tenant_id` 范围内，绝无跨租户数据泄露。
+   - P1-Lite 的 Search 服务 URL、AppID 和 OMA tenant 绑定不可由模型选择；伪造工具参数不得切换租户；
+   - P1-Pro 的 `tenant_id` 必须来自 main-node 认证上下文，禁止信任模型生成的工具参数；repository 漏写 tenant filter 时，RLS/等价防线仍须阻断跨租户读取。
+3. **有界结果测试**：
+   - 100 个候选命中时，响应严格遵守 `top_k`、单片段和总 Tool Result Token 预算；
+   - 每个结果均可通过返回的 node/doc/chunk 标识回读并核对原文；
+   - 按最终序列化 JSON（含 metadata/cursor）计量；超预算时返回 `truncated`/`next_cursor`，不得返回全文兜底；
+   - cursor 必须签名并绑定 tenant、query hash、排序规则和 index generation；篡改、跨租户复用或索引代际失效时拒绝使用。
+4. **权限撤销与索引删除测试**：
+   - 每份缓存/索引记录带 `acl_valid_until` 或等价权限水位；App 被移出知识空间、文档删除或 ACL 收紧后，在冻结的撤权 SLA 内删除或屏蔽对应结果；
+   - 超过最大陈旧时间、ACL 刷新失败或同步水位未知时采用 fail-closed，不得继续返回无法重新验证权限的旧片段；
+   - 分别测试 P1-Lite cache eviction、P1-Pro tombstone/delete、刷新失败及恢复后的重新纳入。
+
+---
+
+## 6. Go/No-go 条件
+
+当前结论：**No-go for implementation**。进入 TDD 前必须完成：
+
+1. 冻结单 OMA tenant 到 `oma-feishu-search` 实例/AppID 的部署绑定与 secret rotation；
+2. 冻结 Search 服务最小权限 DB role、generation 发布、tombstone 和 ACL 同步 SLA；
+3. 冻结 P1-Pro in-process tenant context与 RLS/等价隔离；
+4. 通过目标 PostgreSQL 镜像的 `pg_trgm` Spike，并用标注语料冻结 Recall@K/MRR 与延迟 SLO；
+5. 冻结 Node/Content 两类响应 schema、服务端 Token hard cap 与 cursor 语义。
