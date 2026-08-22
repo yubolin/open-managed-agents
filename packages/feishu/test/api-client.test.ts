@@ -376,4 +376,98 @@ describe("api/client — FeishuApiClient", () => {
       }
     });
   });
+
+  describe("wiki endpoints", () => {
+    it("listWikiSpaces GETs /wiki/v2/spaces with pagination query params", async () => {
+      http.pushScript(() => ok({ tenant_access_token: "t", expire: 7200 }));
+      http.pushScript(() =>
+        ok({
+          items: [
+            {
+              space_id: "spc_1",
+              name: "Engineering KB",
+              description: "Tech docs",
+              space_type: "team",
+            },
+          ],
+          page_token: "pg_tok_1",
+          has_more: true,
+        }),
+      );
+
+      const res = await client.listWikiSpaces({ pageSize: 20, pageToken: "p0" });
+      expect(res.hasMore).toBe(true);
+      expect(res.pageToken).toBe("pg_tok_1");
+      expect(res.items).toHaveLength(1);
+      expect(res.items[0]?.name).toBe("Engineering KB");
+
+      const call = http.calls[1]!;
+      expect(call.url).toBe(
+        "https://open.feishu.cn/open-apis/wiki/v2/spaces?page_size=20&page_token=p0",
+      );
+      expect(call.method).toBe("GET");
+      expect(call.headers?.authorization).toBe("Bearer t");
+    });
+
+    it("listWikiSpaceNodes GETs /wiki/v2/spaces/{space_id}/nodes with parent_node_token", async () => {
+      http.pushScript(() => ok({ tenant_access_token: "t", expire: 7200 }));
+      http.pushScript(() =>
+        ok({
+          items: [
+            {
+              space_id: "spc_1",
+              node_token: "node_1",
+              obj_token: "doc_1",
+              obj_type: "docx",
+              parent_node_token: "parent_0",
+              title: "System Architecture",
+              has_child: false,
+            },
+          ],
+          page_token: "pg_tok_2",
+          has_more: false,
+        }),
+      );
+
+      const res = await client.listWikiSpaceNodes({
+        spaceId: "spc_1",
+        parentNodeToken: "parent_0",
+        pageSize: 50,
+      });
+      expect(res.hasMore).toBe(false);
+      expect(res.items).toHaveLength(1);
+      expect(res.items[0]?.title).toBe("System Architecture");
+
+      const call = http.calls[1]!;
+      expect(call.url).toBe(
+        "https://open.feishu.cn/open-apis/wiki/v2/spaces/spc_1/nodes?parent_node_token=parent_0&page_size=50",
+      );
+      expect(call.method).toBe("GET");
+    });
+
+    it("getWikiNode GETs /wiki/v2/spaces/get_node", async () => {
+      http.pushScript(() => ok({ tenant_access_token: "t", expire: 7200 }));
+      http.pushScript(() =>
+        ok({
+          node: {
+            space_id: "spc_1",
+            node_token: "node_target",
+            obj_token: "doc_target",
+            obj_type: "docx",
+            parent_node_token: "",
+            title: "Getting Started",
+            has_child: true,
+          },
+        }),
+      );
+
+      const res = await client.getWikiNode({ token: "node_target" });
+      expect(res.node?.title).toBe("Getting Started");
+
+      const call = http.calls[1]!;
+      expect(call.url).toBe(
+        "https://open.feishu.cn/open-apis/wiki/v2/spaces/get_node?token=node_target",
+      );
+    });
+  });
 });

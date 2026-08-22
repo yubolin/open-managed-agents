@@ -2,7 +2,7 @@ import { tool } from "ai";
 import { z } from "zod";
 import type { SqlClient } from "@open-managed-agents/sql-client";
 import type { HttpClient } from "@open-managed-agents/integrations-core";
-import { FeishuApiClient } from "@open-managed-agents/feishu";
+import { FeishuApiClient, FeishuSpaceTreeCache } from "@open-managed-agents/feishu";
 import type { FeishuPublicationRepo } from "@open-managed-agents/feishu";
 
 const toolInputMessageSend = z.object({
@@ -21,9 +21,11 @@ const toolInputChatRead = z.object({
 // path ever lists or invokes them (this is true for every provider: Slack,
 // GitHub, Linear, Feishu). The real tool-execution surface the model sees is
 // the AI-SDK `tool()` map passed to `streamText`, built per turn. For a
-// Feishu-backed session this module registers two real tools —
-// `mcp__feishu__im_message_send` and `mcp__feishu__im_chat_read` — that call
-// `FeishuApiClient` directly. Tenant-access-token mint/caching/single-flight
+// Feishu-backed session this module registers in-process tools:
+//   - `mcp__feishu__im_message_send`
+//   - `mcp__feishu__im_chat_read`
+//   - `mcp__feishu__wiki_search_nodes` (and alias `mcp__feishu_kb__wiki_search_nodes`)
+// that call `FeishuApiClient` directly. Tenant-access-token mint/caching/single-flight
 // and 401-refresh all live inside `FeishuApiClient` (already unit-tested); the
 // agent never sees the app secret.
 //
@@ -50,32 +52,83 @@ let config: FeishuAgentToolConfig | null = null;
 
 /** One FeishuApiClient per App; the client caches its own access token. */
 const clientCache = new Map<string, FeishuApiClient>();
+/** One FeishuSpaceTreeCache per App; caches space node hierarchies in-memory. */
+const treeCacheMap = new Map<string, FeishuSpaceTreeCache>();
 
 /**
  * Wire the deps once at boot. Idempotent — re-calling replaces the config and
- * clears the client cache (used by tests between cases).
+ * clears the client and tree caches (used by tests between cases).
  */
 export function configureFeishuAgentTools(next: FeishuAgentToolConfig): void {
   config = next;
   clientCache.clear();
+  treeCacheMap.clear();
 }
 
-/** Drop the config + client cache (test-only). */
+/** Drop the config + client and tree caches (test-only). */
 export function resetFeishuAgentTools(): void {
   config = null;
   clientCache.clear();
+  treeCacheMap.clear();
 }
 
 /**
- * Build the two Feishu tools bound to a live client. Pure + exported so it is
- * unit-testable without a database — the only state it touches is the client's
- * own HTTP layer. Tool names mirror the `FeishuProvider.mcpTools()` descriptors
- * so system prompts referencing them stay accurate. The map is loosely typed
- * (`Record<string, any>`) to match the harness tool-map convention in
- * apps/agent/src/harness/tools.ts — the AI SDK's `tool()` default generic
- * parameters (`Tool<never, never>`) don't widen across two distinct schemas.
+ * Build Feishu tools bound to a live client. Pure + exported so it is
+ * unit-testable without a database.
  */
-export function buildFeishuTools(client: FeishuApiClient): Record<string, any> {
+export function buildFeishuTools(
+  client: FeishuApiClient,
+  treeCache?: FeishuSpaceTreeCache,
+): Record<string, any> {
+  const cache = treeCache ?? new FeishuSpaceTreeCache();
+
+  const wikiSearchTool = tool({
+    description:
+      "Search Feishu wiki nodes and knowledge documents by title or path. Returns compact matching nodes ({ space_id, space_name, node_token, obj_token, obj_type, title, node_path, has_child, score }). Use this before reading full documents to quickly find target node_tokens without reading entire spaces.",
+    inputSchema: z.object({
+      query: z
+        .string()
+        .describe(
+          "Keyword or phrase to search in document titles and folder paths (e.g. 'SDS', '架构设计', '排班').",
+        ),
+      space_id: z
+        .string()
+        .optional()
+        .describe("Optional: limit search to a specific knowledge space_id."),
+      top_k: z
+        .number()
+        .int()
+        .min(1)
+        .max(20)
+        .optional()
+        .describe("Maximum number of results to return (default 5, max 20)."),
+      refresh_cache: z
+        .boolean()
+        .optional()
+        .describe("Optional: set true to force refresh the cached knowledge space tree."),
+    }),
+    execute: async ({ query, space_id, top_k, refresh_cache }) => {
+      try {
+        const res = await cache.search(client, {
+          query,
+          spaceId: space_id,
+          topK: top_k ?? 5,
+          refreshCache: refresh_cache,
+        });
+        return res;
+      } catch (err) {
+        return {
+          ok: false as const,
+          query,
+          total_matched: 0,
+          results: [],
+          truncated: false,
+          error: errMsg(err),
+        };
+      }
+    },
+  });
+
   return {
     mcp__feishu__im_message_send: tool({
       description:
@@ -110,6 +163,8 @@ export function buildFeishuTools(client: FeishuApiClient): Record<string, any> {
         }
       },
     }),
+    mcp__feishu__wiki_search_nodes: wikiSearchTool,
+    mcp__feishu_kb__wiki_search_nodes: wikiSearchTool,
   };
 }
 
@@ -136,7 +191,17 @@ export async function resolveFeishuAgentTools(
 
   const client = await resolveClient(creds.appId, publicationId, config);
   if (!client) return {};
-  return buildFeishuTools(client);
+  const treeCache = getOrCreateTreeCache(creds.appId);
+  return buildFeishuTools(client, treeCache);
+}
+
+function getOrCreateTreeCache(appId: string): FeishuSpaceTreeCache {
+  let cache = treeCacheMap.get(appId);
+  if (!cache) {
+    cache = new FeishuSpaceTreeCache();
+    treeCacheMap.set(appId, cache);
+  }
+  return cache;
 }
 
 async function resolveClient(

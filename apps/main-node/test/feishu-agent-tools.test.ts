@@ -104,6 +104,8 @@ describe("feishu-agent-tools — inbound → tool call → Feishu API", () => {
     expect(Object.keys(tools).sort()).toEqual([
       "mcp__feishu__im_chat_read",
       "mcp__feishu__im_message_send",
+      "mcp__feishu__wiki_search_nodes",
+      "mcp__feishu_kb__wiki_search_nodes",
     ]);
 
     // The model invoked the send tool. FeishuApiClient mints a token first.
@@ -130,6 +132,54 @@ describe("feishu-agent-tools — inbound → tool call → Feishu API", () => {
     });
     // Token handling: the minted token is attached on the send request.
     expect(sendCall.headers?.authorization).toBe("Bearer t-abc");
+  });
+
+  it("wiki_search_nodes drives space & node discovery and returns matching hits", async () => {
+    const http = new FakeHttp();
+    configureFeishuAgentTools({
+      reader: (async () => ({ provider: "feishu", publicationId: "pub_1" })) as SessionMetadataReader,
+      pubs: fakePubs("cli_a", "secret_a"),
+      http,
+    });
+
+    const tools = await resolveFeishuAgentTools("sess_search");
+    // 1. Token mint
+    http.push(() => ok({ tenant_access_token: "t", expire: 7200 }));
+    // 2. listWikiSpaces
+    http.push(() =>
+      ok({
+        items: [{ space_id: "spc_tech", name: "Tech Knowledge" }],
+        has_more: false,
+      }),
+    );
+    // 3. listWikiSpaceNodes (root)
+    http.push(() =>
+      ok({
+        items: [
+          {
+            space_id: "spc_tech",
+            node_token: "wik_sds_node",
+            obj_token: "dox_sds_doc",
+            obj_type: "docx",
+            parent_node_token: "",
+            title: "Harness Context Governance SDS",
+            has_child: false,
+          },
+        ],
+        has_more: false,
+      }),
+    );
+
+    const result = (await exec(tools["mcp__feishu__wiki_search_nodes"]).execute({
+      query: "SDS",
+      top_k: 5,
+    })) as { ok: boolean; total_matched: number; results: Array<{ node_token: string; title: string }> };
+
+    expect(result.ok).toBe(true);
+    expect(result.total_matched).toBe(1);
+    expect(result.results).toHaveLength(1);
+    expect(result.results[0]?.node_token).toBe("wik_sds_node");
+    expect(result.results[0]?.title).toBe("Harness Context Governance SDS");
   });
 
   it("im_chat_read drives the chat-info GET and returns the name", async () => {

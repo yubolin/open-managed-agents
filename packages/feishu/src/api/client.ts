@@ -27,6 +27,42 @@ export interface FeishuApiClientOptions {
   nowMs?: () => number;
 }
 
+export interface FeishuWikiSpace {
+  space_id: string;
+  name: string;
+  description?: string;
+  space_type?: string;
+  visibility?: string;
+  open_sharing?: string;
+}
+
+export interface FeishuWikiSpaceNode {
+  space_id: string;
+  node_token: string;
+  obj_token: string;
+  obj_type: "docx" | "doc" | "sheet" | "bitable" | "file" | "slides" | "mindnote" | string;
+  parent_node_token: string;
+  node_type?: string;
+  origin_node_token?: string;
+  origin_space_id?: string;
+  has_child: boolean;
+  title: string;
+  node_create_time?: string;
+  creator?: string;
+  owner?: string;
+}
+
+export interface FeishuWikiNode {
+  space_id: string;
+  node_token: string;
+  obj_token: string;
+  obj_type: string;
+  parent_node_token: string;
+  node_type?: string;
+  has_child: boolean;
+  title: string;
+}
+
 export class FeishuApiError extends Error {
   readonly code: number;
   readonly tenantKey: string | null;
@@ -198,6 +234,71 @@ export class FeishuApiClient {
     await this.deleteJson(
       `/im/v1/messages/${encodeURIComponent(input.messageId)}/reactions`,
     );
+  }
+
+  /** GET wiki/v2/spaces — list knowledge spaces accessible by the app. */
+  async listWikiSpaces(input?: {
+    pageToken?: string;
+    pageSize?: number;
+  }): Promise<{ items: FeishuWikiSpace[]; pageToken?: string; hasMore: boolean }> {
+    const params = new URLSearchParams();
+    if (input?.pageSize) params.set("page_size", String(input.pageSize));
+    if (input?.pageToken) params.set("page_token", input.pageToken);
+    const qs = params.toString() ? `?${params.toString()}` : "";
+    const res = await this.getJson<{
+      items?: FeishuWikiSpace[];
+      page_token?: string;
+      has_more?: boolean;
+    }>(`/wiki/v2/spaces${qs}`);
+    return {
+      items: res.items ?? [],
+      pageToken: res.page_token,
+      hasMore: Boolean(res.has_more),
+    };
+  }
+
+  /** GET wiki/v2/spaces/{space_id}/nodes — list wiki nodes in a space. */
+  async listWikiSpaceNodes(input: {
+    spaceId: string;
+    parentNodeToken?: string;
+    pageToken?: string;
+    pageSize?: number;
+  }): Promise<{ items: FeishuWikiSpaceNode[]; pageToken?: string; hasMore: boolean }> {
+    const params = new URLSearchParams();
+    if (input.parentNodeToken) params.set("parent_node_token", input.parentNodeToken);
+    if (input.pageSize) params.set("page_size", String(input.pageSize));
+    if (input.pageToken) params.set("page_token", input.pageToken);
+    const qs = params.toString() ? `?${params.toString()}` : "";
+    const res = await this.getJson<{
+      items?: FeishuWikiSpaceNode[];
+      page_token?: string;
+      has_more?: boolean;
+    }>(`/wiki/v2/spaces/${encodeURIComponent(input.spaceId)}/nodes${qs}`);
+    return {
+      items: res.items ?? [],
+      pageToken: res.page_token,
+      hasMore: Boolean(res.has_more),
+    };
+  }
+
+  /** GET wiki/v2/spaces/get_node — get node details by token or doc URL. */
+  async getWikiNode(input: {
+    token: string;
+    objType?: string;
+  }): Promise<{ node: FeishuWikiNode | null }> {
+    const params = new URLSearchParams({ token: input.token });
+    if (input.objType) params.set("obj_type", input.objType);
+    try {
+      const res = await this.getJson<{ node?: FeishuWikiNode }>(
+        `/wiki/v2/spaces/get_node?${params.toString()}`,
+      );
+      return { node: res.node ?? null };
+    } catch (err) {
+      if (err instanceof FeishuApiError && err.code === FEISHU_CHAT_NOT_ACCESSIBLE_CODE) {
+        return { node: null };
+      }
+      throw err;
+    }
   }
 
   // ─── Internal ──────────────────────────────────────────────────────────

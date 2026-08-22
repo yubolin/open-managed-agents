@@ -48,7 +48,18 @@ export {
   FeishuApiClient,
   FeishuApiError,
   type FeishuTenantAccessToken,
+  type FeishuWikiSpace,
+  type FeishuWikiSpaceNode,
+  type FeishuWikiNode,
 } from "./api/client";
+export {
+  FeishuSpaceTreeCache,
+  type CachedWikiNode,
+  type WikiNodeSearchHit,
+  type WikiSearchOptions,
+  type WikiSearchResponse,
+  type FeishuSpaceTreeCacheOptions,
+} from "./cache/space-tree-cache";
 export type {
   FeishuInstallationRepo,
   FeishuPublicationRepo,
